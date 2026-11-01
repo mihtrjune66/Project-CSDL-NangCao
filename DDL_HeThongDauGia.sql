@@ -71,6 +71,7 @@ CREATE TABLE PHIENDAUGIA (
     MaLuotDanDau BIGINT,
     PhienBan INTEGER DEFAULT 0 NOT NULL,
     CONSTRAINT fk_phiendaugia_taisan FOREIGN KEY (MaTaiSan) REFERENCES TAISAN(MaTaiSan),
+    CONSTRAINT ck_phiendaugia_trangthai CHECK (TrangThaiPhien ~ '[^[:space:]]'),
     CONSTRAINT ck_phiendaugia_giakhoidiem CHECK (GiaKhoiDiem > 0 AND GiaKhoiDiem <> 'NaN'::NUMERIC),
     CONSTRAINT ck_phiendaugia_buocgia CHECK (BuocGia > 0 AND BuocGia <> 'NaN'::NUMERIC),
     CONSTRAINT ck_phiendaugia_thoigian CHECK (ThoiDiemDong > ThoiDiemMo),
@@ -87,7 +88,8 @@ CREATE TABLE DANGKY (
     ThoiDiemDangKy TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
     CONSTRAINT pk_dangky PRIMARY KEY (MaPhien, MaNguoiDung),
     CONSTRAINT fk_dangky_phien FOREIGN KEY (MaPhien) REFERENCES PHIENDAUGIA(MaPhien),
-    CONSTRAINT fk_dangky_nguoidung FOREIGN KEY (MaNguoiDung) REFERENCES NGUOIDUNG(MaNguoiDung)
+    CONSTRAINT fk_dangky_nguoidung FOREIGN KEY (MaNguoiDung) REFERENCES NGUOIDUNG(MaNguoiDung),
+    CONSTRAINT ck_dangky_trangthai CHECK (TrangThaiDangKy ~ '[^[:space:]]')
 );
 
 -- 9. BẢNG LƯỢT TRẢ GIÁ
@@ -124,7 +126,8 @@ CREATE TABLE NHATKYTHAYDOI (
     ThoiDiemGhi TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
     MaGiaoDich BIGINT DEFAULT txid_current() NOT NULL,
     CONSTRAINT fk_nhatkythaydoi_phien FOREIGN KEY (MaPhien) REFERENCES PHIENDAUGIA(MaPhien),
-    CONSTRAINT fk_nhatkythaydoi_tacnhan FOREIGN KEY (MaTacNhan) REFERENCES NGUOIDUNG(MaNguoiDung)
+    CONSTRAINT fk_nhatkythaydoi_tacnhan FOREIGN KEY (MaTacNhan) REFERENCES NGUOIDUNG(MaNguoiDung),
+    CONSTRAINT ck_nhatkythaydoi_hanhdong CHECK (HanhDong ~ '[^[:space:]]')
 );
 
 -- Thêm khóa ngoại dẫn đầu sau khi đã tạo bảng LUOTTRAGIA để tránh vòng phụ thuộc khi tạo bảng.
