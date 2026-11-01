@@ -79,15 +79,15 @@ CREATE TABLE PHIENDAUGIA (
     CONSTRAINT ck_phiendaugia_dandau CHECK ((GiaHienTai IS NULL) = (MaLuotDanDau IS NULL))
 );
 
--- 8. BẢNG ĐĂNG KÝ THAM GIA
-CREATE TABLE DANGKYTHAMGIA (
+-- 8. BẢNG ĐĂNG KÝ
+CREATE TABLE DANGKY (
     MaPhien BIGINT NOT NULL,
     MaNguoiDung BIGINT NOT NULL,
     TrangThaiDangKy VARCHAR(50) NOT NULL,
     ThoiDiemDangKy TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    CONSTRAINT pk_dangkythamgia PRIMARY KEY (MaPhien, MaNguoiDung),
-    CONSTRAINT fk_dangkythamgia_phien FOREIGN KEY (MaPhien) REFERENCES PHIENDAUGIA(MaPhien),
-    CONSTRAINT fk_dangkythamgia_nguoidung FOREIGN KEY (MaNguoiDung) REFERENCES NGUOIDUNG(MaNguoiDung)
+    CONSTRAINT pk_dangky PRIMARY KEY (MaPhien, MaNguoiDung),
+    CONSTRAINT fk_dangky_phien FOREIGN KEY (MaPhien) REFERENCES PHIENDAUGIA(MaPhien),
+    CONSTRAINT fk_dangky_nguoidung FOREIGN KEY (MaNguoiDung) REFERENCES NGUOIDUNG(MaNguoiDung)
 );
 
 -- 9. BẢNG LƯỢT TRẢ GIÁ
@@ -101,7 +101,7 @@ CREATE TABLE LUOTTRAGIA (
     CONSTRAINT uk_luottragia_mayeucau UNIQUE (MaYeuCau),
     CONSTRAINT uk_luottragia_phien_sotien UNIQUE (MaPhien, SoTien),
     CONSTRAINT uk_luottragia_luot_phien UNIQUE (MaLuotTraGia, MaPhien),
-    CONSTRAINT fk_luottragia_dangky FOREIGN KEY (MaPhien, MaNguoiTraGia) REFERENCES DANGKYTHAMGIA(MaPhien, MaNguoiDung),
+    CONSTRAINT fk_luottragia_dangky FOREIGN KEY (MaPhien, MaNguoiTraGia) REFERENCES DANGKY(MaPhien, MaNguoiDung),
     CONSTRAINT ck_luottragia_sotien CHECK (SoTien > 0 AND SoTien <> 'NaN'::NUMERIC)
 );
 
