@@ -520,6 +520,20 @@ $$;
 
 COMMIT;
 
+
+-- TESTER --
 -- Ví dụ trả giá cho phiên 1 ngay sau khi nạp dữ liệu mẫu:
--- SELECT fn_TraGia(1, 8, 5750000, '19000000-0000-4000-8000-000000000101');
--- SELECT fn_DongPhienDauGia(2);
+SELECT fn_TraGia(1, 8, 5750000, '19000000-0000-4000-8000-000000000101');
+SELECT fn_DongPhienDauGia(2);
+
+
+SELECT *
+FROM PHIENDAUGIA
+WHERE TrangThaiPhien LIKE 'DANG_DIEN_RA';
+SELECT *
+FROM NHATKYTHAYDOI;
+
+--RESET TRUY VẤN Các phiên đang mở và sẽ kết thúc trong vòng một giờ.
+UPDATE PHIENDAUGIA 
+SET ThoiDiemDong = CURRENT_TIMESTAMP + INTERVAL '30 minutes' 
+WHERE MaPhien = 1;
