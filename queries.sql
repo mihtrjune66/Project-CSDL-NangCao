@@ -540,20 +540,27 @@ WHERE MaPhien = 1;
 
 
 -- =====================================================================
--- BƯỚC 5: PHƯƠNG ÁN 2 - GIAO DỊCH VỚI MỨC CÔ LẬP SERIALIZABLE CÓ XỬ LÝ THỬ LẠI (RETRY)
+-- BƯỚC 5: THIẾT KẾ VÀ SO SÁNH CƠ CHẾ TRANSACTION (GIẢI PHÁP 2 - SERIALIZABLE CÓ RETRY)
 -- =====================================================================
--- Điểm khác biệt so với Phương án 1 (fn_TraGia):
---   + Không dùng lệnh khóa dòng SELECT ... FOR UPDATE (Đọc dữ liệu lạc quan).
---   + Bổ sung vòng lặp FOR ... LOOP và khối bắt lỗi ngoại lệ serialization_failure (mã 40001).
---   + Nếu phát hiện xung đột tuần tự hóa, tự động chờ ngẫu nhiên và thử lại tối đa 5 lần.
+-- Yêu cầu đề cương: So sánh ít nhất 2 phương án: 
+--   1. Khóa dòng phiên đấu giá (Đã thực hiện ở hàm fn_TraGia phía trên - Pessimistic Locking).
+--   2. Mức cô lập SERIALIZABLE có xử lý thử lại (Optimistic Concurrency Control / SSI).
+-- Giao dịch đóng phiên phải phối hợp với giao dịch trả giá theo cùng quy tắc đồng thời.
 -- =====================================================================
 
+-- 1. HÀM TRẢ GIÁ THEO MỨC CÔ LẬP SERIALIZABLE CÓ XỬ LÝ THỬ LẠI (RETRY LOOP)
 CREATE OR REPLACE FUNCTION fn_TraGia_Serializable(
-    p_MaPhien BIGINT, 
-    p_MaNguoiDung BIGINT, 
-    p_SoTien NUMERIC, 
-    p_MaYeuCau UUID
-) RETURNS BIGINT
+    p_MaPhien BIGINT,
+    p_MaNguoiDung BIGINT,
+    p_SoTien NUMERIC,
+    p_MaYeuCau UUID,
+    p_MaxRetries INT DEFAULT 5
+) RETURNS TABLE (
+    MaLuotTraGia BIGINT,
+    SoLanThuLai INT,
+    TrangThai VARCHAR(50),
+    ThongBao TEXT
+)
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -564,79 +571,190 @@ DECLARE
     v_gia_toi_thieu NUMERIC;
     v_thoi_diem TIMESTAMPTZ;
     v_ma_luot BIGINT;
-    v_attempt INT;
+    v_attempt INT := 0;
+    v_delay NUMERIC;
 BEGIN
-    IF p_MaYeuCau IS NULL OR p_SoTien IS NULL OR p_SoTien <= 0 THEN
-        RAISE EXCEPTION 'Mã yêu cầu hoặc số tiền không hợp lệ';
+    -- Kiểm tra tính hợp lệ cơ bản của tham số đầu vào
+    IF p_MaYeuCau IS NULL OR p_SoTien IS NULL OR p_SoTien <= 0
+       OR p_SoTien > 99999999999999.99 OR p_SoTien <> TRUNC(p_SoTien, 2) THEN
+        RAISE EXCEPTION 'Mã yêu cầu hoặc số tiền không hợp lệ' USING ERRCODE = '22023';
     END IF;
 
-    -- Vòng lặp thử lại tối đa 5 lần khi gặp xung đột SERIALIZABLE
-    FOR v_attempt IN 1..5 LOOP
+    -- Vòng lặp thử lại (Retry Loop) tự động xử lý xung đột tuần tự hóa (Serialization Conflict)
+    LOOP
+        v_attempt := v_attempt + 1;
         BEGIN
-            -- 1. Kiểm tra tính Idempotency (chống trùng yêu cầu)
+            -- Kiểm tra Idempotency: mã yêu cầu đã được ghi nhận trước đó chưa (tránh gửi lặp)
             SELECT * INTO v_luot FROM LUOTTRAGIA WHERE MaYeuCau = p_MaYeuCau;
             IF FOUND THEN
-                RETURN v_luot.MaLuotTraGia;
+                IF v_luot.MaPhien IS DISTINCT FROM p_MaPhien
+                   OR v_luot.MaNguoiTraGia IS DISTINCT FROM p_MaNguoiDung
+                   OR v_luot.SoTien IS DISTINCT FROM p_SoTien THEN
+                    RAISE EXCEPTION 'Mã yêu cầu đã dùng cho lượt trả giá khác';
+                END IF;
+                RETURN QUERY SELECT v_luot.MaLuotTraGia, v_attempt - 1, 'DA_TON_TAI'::VARCHAR(50), 'Mã yêu cầu trùng lặp hợp lệ (Idempotent)'::TEXT;
+                RETURN;
             END IF;
 
-            -- 2. Đọc dữ liệu phiên lạc quan (KHÔNG dùng FOR UPDATE)
+            -- ĐỌC DỮ LIỆU LẠC QUAN: Tuyệt đối KHÔNG dùng "FOR UPDATE" (không khóa dòng)
             SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien;
-            IF NOT FOUND OR v_phien.TrangThaiPhien <> 'DANG_DIEN_RA' THEN
-                RAISE EXCEPTION 'Phiên đấu giá không tồn tại hoặc không ở trạng thái mở';
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Không tìm thấy phiên đấu giá';
+            END IF;
+            IF v_phien.TrangThaiPhien <> 'DANG_DIEN_RA' THEN
+                RAISE EXCEPTION 'Phiên không nhận trả giá (Trạng thái: %)', v_phien.TrangThaiPhien;
             END IF;
 
-            -- 3. Kiểm tra các điều kiện nghiệp vụ
+            -- Ràng buộc: Người bán không được tự đấu giá tài sản của mình
             SELECT MaNguoiBan INTO v_nguoi_ban FROM TAISAN WHERE MaTaiSan = v_phien.MaTaiSan;
             IF p_MaNguoiDung = v_nguoi_ban THEN
                 RAISE EXCEPTION 'Người bán không được trả giá tài sản của mình';
             END IF;
 
+            -- Ràng buộc: Người trả giá bắt buộc phải có đăng ký đã được duyệt
             SELECT TrangThaiDangKy INTO v_trang_thai_dang_ky FROM DANGKY
             WHERE MaPhien = p_MaPhien AND MaNguoiDung = p_MaNguoiDung;
             IF v_trang_thai_dang_ky IS DISTINCT FROM 'DA_DUYET' THEN
-                RAISE EXCEPTION 'Người trả giá chưa có đăng ký được duyệt';
+                RAISE EXCEPTION 'Người trả giá chưa có đăng ký được duyệt cho phiên này';
             END IF;
 
+            -- Ràng buộc: Mức giá trả phải >= Giá hiện tại + Bước giá và đúng lưới bước giá
             v_gia_toi_thieu := COALESCE(v_phien.GiaHienTai + v_phien.BuocGia, v_phien.GiaKhoiDiem);
-            IF p_SoTien < v_gia_toi_thieu OR MOD(p_SoTien - v_phien.GiaKhoiDiem, v_phien.BuocGia) <> 0 THEN
-                RAISE EXCEPTION 'Giá trả không hợp lệ (Tối thiểu %, bước giá %)', v_gia_toi_thieu, v_phien.BuocGia;
+            IF p_SoTien < v_gia_toi_thieu
+               OR MOD(p_SoTien - v_phien.GiaKhoiDiem, v_phien.BuocGia) <> 0 THEN
+                RAISE EXCEPTION 'Giá trả phải từ % và đúng lưới bước giá %', v_gia_toi_thieu, v_phien.BuocGia;
             END IF;
 
+            -- Ràng buộc: Thời điểm trả giá phải nằm trong khung giờ phiên đang mở
             v_thoi_diem := clock_timestamp();
             IF v_thoi_diem < v_phien.ThoiDiemMo OR v_thoi_diem >= v_phien.ThoiDiemDong THEN
-                RAISE EXCEPTION 'Thời điểm trả giá nằm ngoài khung giờ nhận lượt';
+                RAISE EXCEPTION 'Thời điểm trả giá nằm ngoài giờ nhận lượt';
             END IF;
 
-            -- 4. Ghi nhận lượt trả giá & cập nhật phiên nguyên tử
+            -- Ghi nhận lượt trả giá mới vào LUOTTRAGIA
             INSERT INTO LUOTTRAGIA (MaPhien, MaNguoiTraGia, SoTien, MaYeuCau, ThoiDiemChapNhan)
             VALUES (p_MaPhien, p_MaNguoiDung, p_SoTien, p_MaYeuCau, v_thoi_diem)
             RETURNING MaLuotTraGia INTO v_ma_luot;
 
+            -- Cập nhật PHIENDAUGIA: Gán giá mới, người dẫn đầu mới và tăng PhienBan
             UPDATE PHIENDAUGIA
-            SET GiaHienTai = p_SoTien, MaLuotDanDau = v_ma_luot, PhienBan = PhienBan + 1
+            SET GiaHienTai = p_SoTien, 
+                MaLuotDanDau = v_ma_luot, 
+                PhienBan = PhienBan + 1
             WHERE MaPhien = p_MaPhien;
 
+            -- Ghi nhật ký thay đổi hệ thống
             INSERT INTO NHATKYTHAYDOI (MaPhien, MaTacNhan, HanhDong, ChiTiet, ThoiDiemGhi)
             VALUES (p_MaPhien, p_MaNguoiDung, 'CHAP_NHAN_TRA_GIA',
-                    jsonb_build_object('MaLuotTraGia', v_ma_luot, 'SoTien', p_SoTien, 'MaYeuCau', p_MaYeuCau),
+                    jsonb_build_object('MaLuotTraGia', v_ma_luot, 'SoTien', p_SoTien, 'MaYeuCau', p_MaYeuCau, 'ThuLai', v_attempt - 1),
                     v_thoi_diem);
 
-            RETURN v_ma_luot; -- Thành công!
+            -- Trả về kết quả thành công kèm số lần đã phải retry
+            RETURN QUERY SELECT v_ma_luot, v_attempt - 1, 'THANH_CONG'::VARCHAR(50), 'Chấp nhận trả giá thành công'::TEXT;
+            RETURN;
 
         EXCEPTION
-            -- Bắt lỗi xung đột tuần tự hóa (40001) hoặc Deadlock để thử lại
+            -- Bắt lỗi xung đột tuần tự hóa (Mã 40001: serialization_failure) hoặc Deadlock (40P01)
             WHEN serialization_failure OR deadlock_detected THEN
-                IF v_attempt = 5 THEN
-                    RAISE EXCEPTION 'Giao dịch thất bại sau 5 lần thử lại do xung đột tuần tự hóa';
+                IF v_attempt >= p_MaxRetries THEN
+                    RETURN QUERY SELECT NULL::BIGINT, v_attempt, 'THAT_BAI'::VARCHAR(50), 'Vượt quá số lần thử lại tối đa do xung đột tuần tự hóa'::TEXT;
+                    RETURN;
                 END IF;
-                -- Trì hoãn ngẫu nhiên trước khi thử lại vòng kế tiếp
-                PERFORM pg_sleep(0.01 * v_attempt + random() * 0.02);
+                -- Random Exponential Backoff: Trì hoãn ngẫu nhiên 10ms - 50ms để giải tỏa xung đột
+                v_delay := (10 + (random() * 40)) / 1000.0;
+                PERFORM pg_sleep(v_delay);
         END;
     END LOOP;
 END;
 $$;
 
--- Ví dụ gọi thử nghiệm hàm SERIALIZABLE:
--- SELECT fn_TraGia_Serializable(1, 8, 5750000, '19000000-0000-4000-8000-000000000201'::UUID);
+
+-- 2. HÀM ĐÓNG PHIÊN PHỐI HỢP ĐỒNG THỜI THEO MỨC SERIALIZABLE CÓ RETRY
+CREATE OR REPLACE FUNCTION fn_DongPhienDauGia_Serializable(
+    p_MaPhien BIGINT,
+    p_MaxRetries INT DEFAULT 5
+) RETURNS TABLE (
+    MaLuotThang BIGINT,
+    SoLanThuLai INT,
+    TrangThai VARCHAR(50),
+    ThongBao TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_phien PHIENDAUGIA%ROWTYPE;
+    v_ma_luot_thang BIGINT;
+    v_gia_thang NUMERIC(16,2);
+    v_thoi_diem TIMESTAMPTZ;
+    v_attempt INT := 0;
+    v_delay NUMERIC;
+BEGIN
+    LOOP
+        v_attempt := v_attempt + 1;
+        BEGIN
+            -- Kiểm tra xem phiên đã chốt kết quả trước đó chưa
+            SELECT MaLuotThang INTO v_ma_luot_thang FROM KETQUADAUGIA WHERE MaPhien = p_MaPhien;
+            IF FOUND THEN
+                RETURN QUERY SELECT v_ma_luot_thang, v_attempt - 1, 'DA_DONG'::VARCHAR(50), 'Phiên đã được chốt kết quả trước đó'::TEXT;
+                RETURN;
+            END IF;
+
+            -- Đọc thông tin phiên không dùng khóa dòng FOR UPDATE
+            SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Không tìm thấy phiên đấu giá';
+            END IF;
+
+            v_thoi_diem := clock_timestamp();
+            IF v_thoi_diem < v_phien.ThoiDiemDong THEN
+                RAISE EXCEPTION 'Phiên chưa đến giờ đóng (Hiện tại: %, Giờ đóng: %)', v_thoi_diem, v_phien.ThoiDiemDong;
+            END IF;
+            IF v_phien.TrangThaiPhien NOT IN ('DANG_DIEN_RA', 'CHUA_MO') THEN
+                RAISE EXCEPTION 'Trạng thái phiên không cho phép chốt kết quả';
+            END IF;
+
+            -- Tìm lượt trả giá cao nhất để trao giải thắng
+            SELECT MaLuotTraGia, SoTien INTO v_ma_luot_thang, v_gia_thang
+            FROM LUOTTRAGIA
+            WHERE MaPhien = p_MaPhien
+            ORDER BY SoTien DESC, MaLuotTraGia ASC
+            LIMIT 1;
+
+            -- Ghi nhận kết quả chốt phiên
+            INSERT INTO KETQUADAUGIA (MaPhien, MaLuotThang, ThoiDiemChot)
+            VALUES (p_MaPhien, v_ma_luot_thang, v_thoi_diem);
+
+            -- Cập nhật trạng thái phiên
+            UPDATE PHIENDAUGIA
+            SET TrangThaiPhien = CASE WHEN v_ma_luot_thang IS NULL THEN 'THAT_BAI' ELSE 'DA_DONG' END,
+                GiaHienTai = v_gia_thang, 
+                MaLuotDanDau = v_ma_luot_thang, 
+                PhienBan = PhienBan + 1
+            WHERE MaPhien = p_MaPhien;
+
+            -- Ghi nhật ký đóng phiên
+            INSERT INTO NHATKYTHAYDOI (MaPhien, HanhDong, ChiTiet, ThoiDiemGhi)
+            VALUES (p_MaPhien, 'DONG_PHIEN',
+                    jsonb_build_object('MaLuotThang', v_ma_luot_thang, 'GiaThang', v_gia_thang, 'ThuLai', v_attempt - 1),
+                    v_thoi_diem);
+
+            RETURN QUERY SELECT v_ma_luot_thang, v_attempt - 1, 'THANH_CONG'::VARCHAR(50), 
+                                CASE WHEN v_ma_luot_thang IS NULL THEN 'Phiên kết thúc thất bại (không có lượt trả giá)' 
+                                     ELSE 'Chốt người thắng cuộc thành công' END::TEXT;
+            RETURN;
+
+        EXCEPTION
+            WHEN serialization_failure OR deadlock_detected THEN
+                IF v_attempt >= p_MaxRetries THEN
+                    RETURN QUERY SELECT NULL::BIGINT, v_attempt, 'THAT_BAI'::VARCHAR(50), 'Đóng phiên thất bại do xung đột tuần tự hóa kéo dài'::TEXT;
+                    RETURN;
+                END IF;
+                v_delay := (10 + (random() * 40)) / 1000.0;
+                PERFORM pg_sleep(v_delay);
+        END;
+    END LOOP;
+END;
+$$;
+
 
 
