@@ -1,0 +1,9 @@
+# Word temporary files
+~$*.docx
+~$*.doc
+
+# Temp files
+*.tmp
+*.temp
+buoc6.pdf
+
