@@ -1,107 +1,10 @@
--- Truy vấn: Xây dựng cây phân cấp danh mục và thống kê cộng dồn 
--- (Roll-up) tổng số tài sản & phiên đấu giá từ danh mục con lên danh mục cha
-
-WITH RECURSIVE CayDanhMuc AS (
-    -- Bước cơ sở: Lấy các danh mục gốc (Cấp 1)
-    SELECT 
-        dm.MaDanhMuc,
-        dm.TenDanhMuc,
-        dm.MaDanhMucCha,
-        1 AS CapDo,
-        dm.TenDanhMuc::TEXT AS DuongDanPhanCap,
-        LPAD('', 0, ' ') || dm.TenDanhMuc AS TenHienThiCay
-    FROM DANHMUC dm
-    WHERE dm.MaDanhMucCha IS NULL
-
-    UNION ALL
-
-    -- Bước đệ quy: Nối các danh mục con vào danh mục cha
-    SELECT 
-        con.MaDanhMuc,
-        con.TenDanhMuc,
-        con.MaDanhMucCha,
-        cha.CapDo + 1 AS CapDo,
-        (cha.DuongDanPhanCap || ' - ' || con.TenDanhMuc)::TEXT AS DuongDanPhanCap,
-        (REPEAT('    ', cha.CapDo) || '|-- ' || con.TenDanhMuc)::VARCHAR(255) AS TenHienThiCay
-    FROM DANHMUC con
-    INNER JOIN CayDanhMuc cha ON con.MaDanhMucCha = cha.MaDanhMuc
-),
--- CTE phụ: Tìm mọi cặp (Danh mục Tổ tiên, Danh mục Con cháu bao gồm chính nó)
--- để tính tổng cộng dồn từ các nhánh lá lên nhánh gốc
-QuanHeToTienConChau AS (
-    SELECT MaDanhMuc AS MaToTien, MaDanhMuc AS MaConChau
-    FROM DANHMUC
-    
-    UNION ALL
-    
-    SELECT qh.MaToTien, dm.MaDanhMuc AS MaConChau
-    FROM QuanHeToTienConChau qh
-    INNER JOIN DANHMUC dm ON dm.MaDanhMucCha = qh.MaConChau
-),
-ThongKeCongDon AS (
-    SELECT 
-        qh.MaToTien AS MaDanhMuc,
-        COUNT(DISTINCT ts.MaTaiSan) AS TongSoTaiSanTrongNhanh,
-        COUNT(DISTINCT pdg.MaPhien) AS TongSoPhienTrongNhanh
-    FROM QuanHeToTienConChau qh
-    LEFT JOIN TAISAN ts ON ts.MaDanhMuc = qh.MaConChau
-    LEFT JOIN PHIENDAUGIA pdg ON pdg.MaTaiSan = ts.MaTaiSan
-    GROUP BY qh.MaToTien
-)
-SELECT 
-    c.MaDanhMuc,
-    c.CapDo,
-    c.TenHienThiCay AS CauTrucCayDanhMuc,
-    tk.TongSoTaiSanTrongNhanh,
-    tk.TongSoPhienTrongNhanh,
-    c.DuongDanPhanCap
-FROM CayDanhMuc c
-LEFT JOIN ThongKeCongDon tk ON c.MaDanhMuc = tk.MaDanhMuc
-ORDER BY c.DuongDanPhanCap;
-
--- Truy vấn: Tìm toàn bộ Tài sản và Phiên đấu giá thuộc một nhánh 
--- danh mục bất kỳ (Ví dụ: Nhánh 1 - 'Thiết bị công nghệ & Điện tử')
--- ---------------------------------------------------------------------
-WITH RECURSIVE NhanhDanhMucCon AS (
-    -- Chọn danh mục gốc cần tra cứu (có thể đổi MaDanhMuc = 1, 2, hoặc 3...)
-    SELECT MaDanhMuc, TenDanhMuc, MaDanhMucCha, 1 AS CapDo
-    FROM DANHMUC
-    WHERE MaDanhMuc = 1 
-
-    UNION ALL
-
-    -- Đệ quy lấy toàn bộ danh mục con, cháu bên dưới
-    SELECT dm.MaDanhMuc, dm.TenDanhMuc, dm.MaDanhMucCha, ndm.CapDo + 1
-    FROM DANHMUC dm
-    INNER JOIN NhanhDanhMucCon ndm ON dm.MaDanhMucCha = ndm.MaDanhMuc
-)
-SELECT 
-    ndm.MaDanhMuc,
-    ndm.TenDanhMuc,
-    ts.MaTaiSan,
-    ts.TenTaiSan,
-    ts.LoaiTaiSan,
-    nd.HoTen AS NguoiBan,
-    pdg.MaPhien,
-    pdg.GiaKhoiDiem,
-    COALESCE(pdg.GiaHienTai, pdg.GiaKhoiDiem) AS GiaHienTaiHoacKhoiDiem,
-    pdg.TrangThaiPhien
-FROM NhanhDanhMucCon ndm
-INNER JOIN TAISAN ts ON ts.MaDanhMuc = ndm.MaDanhMuc
-INNER JOIN NGUOIDUNG nd ON nd.MaNguoiDung = ts.MaNguoiBan
-LEFT JOIN PHIENDAUGIA pdg ON pdg.MaTaiSan = ts.MaTaiSan
-ORDER BY ndm.MaDanhMuc, ts.MaTaiSan;
-
-
--- HÀM BÁO CÁO CÓ BỘ LỌC ĐỘNG 
--- Mục đích: Cho phép lọc danh sách phiên đấu giá theo nhiều tiêu chí tùy chọn:
+-- 1. HÀM BÁO CÁO CÓ BỘ LỌC ĐỘNG (Dynamic SQL)
+-- Mục đích: Lọc danh sách phiên đấu giá theo nhiều tiêu chí tùy chọn:
 --   + p_MaDanhMucGoc : Lọc theo nhánh danh mục (tự động lấy cả danh mục con cháu)
 --   + p_TrangThai    : Lọc theo trạng thái phiên (VD: 'DANG_MO', 'DA_DONG'...)
 --   + p_LoaiTaiSan   : Lọc theo phân lớp ('TACPHAMNGHETHUAT', 'DOSUUTAM', 'THIETBIDIENTU')
---   + p_GiaTu / p_GiaDen: Khoảng giá hiện tại (hoặc giá khởi điểm nếu chưa ai trả giá)
+--   + p_GiaTu/p_GiaDen: Khoảng giá hiện tại (hoặc giá khởi điểm nếu chưa ai trả giá)
 --   + p_TuKhoa       : Tìm kiếm gần đúng (ILIKE) theo tên tài sản
--- Sử dụng kỹ thuật Dynamic SQL (EXECUTE ... USING) chống SQL Injection.
-
 CREATE OR REPLACE FUNCTION fn_BaoCaoPhienDauGiaDong(
     p_MaDanhMucGoc BIGINT DEFAULT NULL,
     p_TrangThai VARCHAR(50) DEFAULT NULL,
@@ -202,19 +105,337 @@ BEGIN
 END;
 $$;
 
-SELECT * FROM fn_BaoCaoPhienDauGiaDong();
-SELECT * FROM fn_BaoCaoPhienDauGiaDong(p_MaDanhMucGoc => 1);
-SELECT * FROM fn_BaoCaoPhienDauGiaDong(
-    p_LoaiTaiSan => 'DOSUUTAM',
-    p_GiaTu      => 1000000,
-    p_GiaDen     => 50000000
-);
+
+-- 2. HÀM TRẢ GIÁ - PHƯƠNG ÁN 1: KHÓA BI QUAN (Pessimistic Locking)
+-- Sử dụng: SELECT ... FOR UPDATE trên dòng phiên đấu giá
+-- Kiểm tra điều kiện hợp lệ, ghi nhận lịch sử và cập nhật giá hiện tại nguyên tử
+CREATE OR REPLACE FUNCTION fn_TraGia(
+    p_MaPhien BIGINT, p_MaNguoiDung BIGINT, p_SoTien NUMERIC, p_MaYeuCau UUID
+) RETURNS BIGINT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_phien PHIENDAUGIA%ROWTYPE;
+    v_luot LUOTTRAGIA%ROWTYPE;
+    v_nguoi_ban BIGINT;
+    v_trang_thai_dang_ky VARCHAR(50);
+    v_gia_toi_thieu NUMERIC;
+    v_thoi_diem TIMESTAMPTZ;
+    v_ma_luot BIGINT;
+BEGIN
+    IF p_MaYeuCau IS NULL OR p_SoTien IS NULL OR p_SoTien <= 0
+       OR p_SoTien > 99999999999999.99 OR p_SoTien <> TRUNC(p_SoTien, 2) THEN
+        RAISE EXCEPTION 'Mã yêu cầu hoặc số tiền không hợp lệ' USING ERRCODE = '22023';
+    END IF;
+
+    -- Hai lần gửi cùng UUID phải kiểm tra tuần tự, kể cả khi gửi vào hai phiên.
+    PERFORM pg_advisory_xact_lock(hashtextextended(p_MaYeuCau::TEXT, 19));
+    SELECT * INTO v_luot FROM LUOTTRAGIA WHERE MaYeuCau = p_MaYeuCau;
+    IF FOUND THEN
+        IF v_luot.MaPhien IS DISTINCT FROM p_MaPhien
+           OR v_luot.MaNguoiTraGia IS DISTINCT FROM p_MaNguoiDung
+           OR v_luot.SoTien IS DISTINCT FROM p_SoTien THEN
+            RAISE EXCEPTION 'Mã yêu cầu đã dùng cho lượt trả giá khác';
+        END IF;
+        RETURN v_luot.MaLuotTraGia;
+    END IF;
+
+    SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Không tìm thấy phiên đấu giá';
+    END IF;
+    IF v_phien.TrangThaiPhien <> 'DANG_DIEN_RA' THEN
+        RAISE EXCEPTION 'Phiên không nhận trả giá';
+    END IF;
+
+    SELECT MaNguoiBan INTO v_nguoi_ban FROM TAISAN
+    WHERE MaTaiSan = v_phien.MaTaiSan FOR SHARE;
+    IF p_MaNguoiDung = v_nguoi_ban THEN
+        RAISE EXCEPTION 'Người bán không được trả giá tài sản của mình';
+    END IF;
+
+    SELECT TrangThaiDangKy INTO v_trang_thai_dang_ky FROM DANGKY
+    WHERE MaPhien = p_MaPhien AND MaNguoiDung = p_MaNguoiDung FOR SHARE;
+    IF v_trang_thai_dang_ky IS DISTINCT FROM 'DA_DUYET' THEN
+        RAISE EXCEPTION 'Người trả giá chưa có đăng ký được duyệt cho phiên này';
+    END IF;
+
+    v_gia_toi_thieu := COALESCE(v_phien.GiaHienTai + v_phien.BuocGia, v_phien.GiaKhoiDiem);
+    IF p_SoTien < v_gia_toi_thieu
+       OR MOD(p_SoTien - v_phien.GiaKhoiDiem, v_phien.BuocGia) <> 0 THEN
+        RAISE EXCEPTION 'Giá trả phải từ % và đúng lưới bước giá %',
+            v_gia_toi_thieu, v_phien.BuocGia;
+    END IF;
+
+    -- Đọc đồng hồ sau khi đã chờ các khóa để không dùng giờ bắt đầu transaction.
+    v_thoi_diem := clock_timestamp();
+    IF v_thoi_diem < v_phien.ThoiDiemMo OR v_thoi_diem >= v_phien.ThoiDiemDong THEN
+        RAISE EXCEPTION 'Thời điểm trả giá nằm ngoài giờ nhận lượt';
+    END IF;
+
+    INSERT INTO LUOTTRAGIA (MaPhien, MaNguoiTraGia, SoTien, MaYeuCau, ThoiDiemChapNhan)
+    VALUES (p_MaPhien, p_MaNguoiDung, p_SoTien, p_MaYeuCau, v_thoi_diem)
+    RETURNING MaLuotTraGia INTO v_ma_luot;
+
+    UPDATE PHIENDAUGIA
+    SET GiaHienTai = p_SoTien, MaLuotDanDau = v_ma_luot, PhienBan = PhienBan + 1
+    WHERE MaPhien = p_MaPhien;
+
+    INSERT INTO NHATKYTHAYDOI (MaPhien, MaTacNhan, HanhDong, ChiTiet, ThoiDiemGhi)
+    VALUES (p_MaPhien, p_MaNguoiDung, 'CHAP_NHAN_TRA_GIA',
+            jsonb_build_object('MaLuotTraGia', v_ma_luot, 'SoTien', p_SoTien, 'MaYeuCau', p_MaYeuCau),
+            v_thoi_diem);
+
+    RETURN v_ma_luot;
+END;
+$$;
 
 
--- ===================== PHẦN THÀNH VIÊN 2 =====================
--- Thứ tự chạy: DDL_HeThongDauGia.sql, seed_data.sql, queries.sql.
-BEGIN;
+-- 3. HÀM ĐÓNG PHIÊN ĐẤU GIÁ (fn_DongPhienDauGia)
+-- Sử dụng: SELECT ... FOR UPDATE để khóa phiên
+-- Chốt kết quả vào KETQUADAUGIA, cập nhật trạng thái DA_DONG hoặc THAT_BAI
+-- Trả về mã lượt thắng (MaLuotThang), hoặc NULL nếu không có người trả giá
+CREATE OR REPLACE FUNCTION fn_DongPhienDauGia(p_MaPhien BIGINT)
+RETURNS BIGINT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_phien PHIENDAUGIA%ROWTYPE;
+    v_ma_luot_thang BIGINT;
+    v_gia_thang NUMERIC(16,2);
+    v_thoi_diem TIMESTAMPTZ;
+BEGIN
+    SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Không tìm thấy phiên đấu giá';
+    END IF;
 
+    SELECT MaLuotThang INTO v_ma_luot_thang FROM KETQUADAUGIA WHERE MaPhien = p_MaPhien;
+    IF FOUND THEN
+        RETURN v_ma_luot_thang;
+    END IF;
+
+    v_thoi_diem := clock_timestamp();
+    IF v_thoi_diem < v_phien.ThoiDiemDong THEN
+        RAISE EXCEPTION 'Phiên chưa đến giờ đóng';
+    END IF;
+    IF v_phien.TrangThaiPhien NOT IN ('DANG_DIEN_RA', 'CHUA_MO') THEN
+        RAISE EXCEPTION 'Trạng thái phiên không cho phép chốt kết quả';
+    END IF;
+
+    SELECT MaLuotTraGia, SoTien INTO v_ma_luot_thang, v_gia_thang
+    FROM LUOTTRAGIA
+    WHERE MaPhien = p_MaPhien
+    ORDER BY SoTien DESC, MaLuotTraGia
+    LIMIT 1;
+
+    INSERT INTO KETQUADAUGIA (MaPhien, MaLuotThang, ThoiDiemChot)
+    VALUES (p_MaPhien, v_ma_luot_thang, v_thoi_diem);
+
+    UPDATE PHIENDAUGIA
+    SET TrangThaiPhien = CASE WHEN v_ma_luot_thang IS NULL THEN 'THAT_BAI' ELSE 'DA_DONG' END,
+        GiaHienTai = v_gia_thang, MaLuotDanDau = v_ma_luot_thang, PhienBan = PhienBan + 1
+    WHERE MaPhien = p_MaPhien;
+
+    INSERT INTO NHATKYTHAYDOI (MaPhien, HanhDong, ChiTiet, ThoiDiemGhi)
+    VALUES (p_MaPhien, 'DONG_PHIEN',
+            jsonb_build_object('MaLuotThang', v_ma_luot_thang, 'GiaThang', v_gia_thang),
+            v_thoi_diem);
+
+    RETURN v_ma_luot_thang;
+END;
+$$;
+
+
+-- 4. HÀM TRẢ GIÁ - PHƯƠNG ÁN 2: MỨC CÔ LẬP TUẦN TỰ HÓA CÓ RETRY LOOP
+-- Sử dụng: Mức cô lập SERIALIZABLE (SSI) đọc lạc quan (KHÔNG dùng FOR UPDATE)
+-- Tự động bắt mã lỗi 40001 (serialization_failure) và thử lại tối đa 5 lần
+CREATE OR REPLACE FUNCTION fn_TraGia_Serializable(
+    p_MaPhien BIGINT, 
+    p_MaNguoiDung BIGINT, 
+    p_SoTien NUMERIC, 
+    p_MaYeuCau UUID
+) RETURNS BIGINT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_phien PHIENDAUGIA%ROWTYPE;
+    v_luot LUOTTRAGIA%ROWTYPE;
+    v_nguoi_ban BIGINT;
+    v_trang_thai_dang_ky VARCHAR(50);
+    v_gia_toi_thieu NUMERIC;
+    v_thoi_diem TIMESTAMPTZ;
+    v_ma_luot BIGINT;
+    v_attempt INT;
+BEGIN
+    IF p_MaYeuCau IS NULL OR p_SoTien IS NULL OR p_SoTien <= 0 THEN
+        RAISE EXCEPTION 'Mã yêu cầu hoặc số tiền không hợp lệ';
+    END IF;
+
+    -- Vòng lặp thử lại tối đa 5 lần khi gặp xung đột tuần tự hóa (SERIALIZABLE)
+    FOR v_attempt IN 1..5 LOOP
+        BEGIN
+            -- 1. Kiểm tra chống gửi lặp cùng mã yêu cầu (Idempotency)
+            SELECT * INTO v_luot FROM LUOTTRAGIA WHERE MaYeuCau = p_MaYeuCau;
+            IF FOUND THEN
+                RETURN v_luot.MaLuotTraGia;
+            END IF;
+
+            -- 2. Đọc dữ liệu phiên lạc quan (KHÔNG dùng FOR UPDATE)
+            SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien;
+            IF NOT FOUND OR v_phien.TrangThaiPhien <> 'DANG_DIEN_RA' THEN
+                RAISE EXCEPTION 'Phiên đấu giá không tồn tại hoặc không ở trạng thái mở';
+            END IF;
+
+            -- 3. Kiểm tra điều kiện người tham gia và mức giá
+            SELECT MaNguoiBan INTO v_nguoi_ban FROM TAISAN WHERE MaTaiSan = v_phien.MaTaiSan;
+            IF p_MaNguoiDung = v_nguoi_ban THEN
+                RAISE EXCEPTION 'Người bán không được trả giá tài sản của mình';
+            END IF;
+
+            SELECT TrangThaiDangKy INTO v_trang_thai_dang_ky FROM DANGKY
+            WHERE MaPhien = p_MaPhien AND MaNguoiDung = p_MaNguoiDung;
+            IF v_trang_thai_dang_ky IS DISTINCT FROM 'DA_DUYET' THEN
+                RAISE EXCEPTION 'Người trả giá chưa có đăng ký được duyệt';
+            END IF;
+
+            v_gia_toi_thieu := COALESCE(v_phien.GiaHienTai + v_phien.BuocGia, v_phien.GiaKhoiDiem);
+            IF p_SoTien < v_gia_toi_thieu OR MOD(p_SoTien - v_phien.GiaKhoiDiem, v_phien.BuocGia) <> 0 THEN
+                RAISE EXCEPTION 'Giá trả không hợp lệ (Tối thiểu %, bước giá %)', v_gia_toi_thieu, v_phien.BuocGia;
+            END IF;
+
+            v_thoi_diem := clock_timestamp();
+            IF v_thoi_diem < v_phien.ThoiDiemMo OR v_thoi_diem >= v_phien.ThoiDiemDong THEN
+                RAISE EXCEPTION 'Thời điểm trả giá nằm ngoài khung giờ nhận lượt';
+            END IF;
+
+            -- 4. Ghi nhận lượt trả giá và cập nhật phiên nguyên tử
+            INSERT INTO LUOTTRAGIA (MaPhien, MaNguoiTraGia, SoTien, MaYeuCau, ThoiDiemChapNhan)
+            VALUES (p_MaPhien, p_MaNguoiDung, p_SoTien, p_MaYeuCau, v_thoi_diem)
+            RETURNING MaLuotTraGia INTO v_ma_luot;
+
+            UPDATE PHIENDAUGIA
+            SET GiaHienTai = p_SoTien, MaLuotDanDau = v_ma_luot, PhienBan = PhienBan + 1
+            WHERE MaPhien = p_MaPhien;
+
+            INSERT INTO NHATKYTHAYDOI (MaPhien, MaTacNhan, HanhDong, ChiTiet, ThoiDiemGhi)
+            VALUES (p_MaPhien, p_MaNguoiDung, 'CHAP_NHAN_TRA_GIA',
+                    jsonb_build_object('MaLuotTraGia', v_ma_luot, 'SoTien', p_SoTien, 'MaYeuCau', p_MaYeuCau),
+                    v_thoi_diem);
+
+            RETURN v_ma_luot; -- Trả về thành công
+
+        EXCEPTION
+            -- Bắt lỗi xung đột SERIALIZABLE, tự động thử lại
+            WHEN serialization_failure OR deadlock_detected THEN
+                IF v_attempt = 5 THEN
+                    RAISE EXCEPTION 'Giao dịch thất bại sau 5 lần thử lại do xung đột tuần tự hóa';
+                END IF;
+                -- Nghỉ một khoảng ngắn trước khi thử lại
+                PERFORM pg_sleep(0.01 * v_attempt + random() * 0.02);
+        END;
+    END LOOP;
+END;
+$$;
+
+
+
+-- 1. Truy vấn: Xây dựng cây phân cấp danh mục và thống kê cộng dồn 
+-- (Roll-up) tổng số tài sản & phiên đấu giá từ danh mục con lên danh mục cha
+WITH RECURSIVE CayDanhMuc AS (
+    -- Bước cơ sở: Lấy các danh mục gốc (Cấp 1)
+    SELECT 
+        dm.MaDanhMuc,
+        dm.TenDanhMuc,
+        dm.MaDanhMucCha,
+        1 AS CapDo,
+        dm.TenDanhMuc::TEXT AS DuongDanPhanCap,
+        LPAD('', 0, ' ') || dm.TenDanhMuc AS TenHienThiCay
+    FROM DANHMUC dm
+    WHERE dm.MaDanhMucCha IS NULL
+
+    UNION ALL
+
+    -- Bước đệ quy: Nối các danh mục con vào danh mục cha
+    SELECT 
+        con.MaDanhMuc,
+        con.TenDanhMuc,
+        con.MaDanhMucCha,
+        cha.CapDo + 1 AS CapDo,
+        (cha.DuongDanPhanCap || ' - ' || con.TenDanhMuc)::TEXT AS DuongDanPhanCap,
+        (REPEAT('    ', cha.CapDo) || '|-- ' || con.TenDanhMuc)::VARCHAR(255) AS TenHienThiCay
+    FROM DANHMUC con
+    INNER JOIN CayDanhMuc cha ON con.MaDanhMucCha = cha.MaDanhMuc
+),
+-- CTE phụ: Tìm mọi cặp (Danh mục Tổ tiên, Danh mục Con cháu bao gồm chính nó)
+-- để tính tổng cộng dồn từ các nhánh lá lên nhánh gốc
+QuanHeToTienConChau AS (
+    SELECT MaDanhMuc AS MaToTien, MaDanhMuc AS MaConChau
+    FROM DANHMUC
+    
+    UNION ALL
+    
+    SELECT qh.MaToTien, dm.MaDanhMuc AS MaConChau
+    FROM QuanHeToTienConChau qh
+    INNER JOIN DANHMUC dm ON dm.MaDanhMucCha = qh.MaConChau
+),
+ThongKeCongDon AS (
+    SELECT 
+        qh.MaToTien AS MaDanhMuc,
+        COUNT(DISTINCT ts.MaTaiSan) AS TongSoTaiSanTrongNhanh,
+        COUNT(DISTINCT pdg.MaPhien) AS TongSoPhienTrongNhanh
+    FROM QuanHeToTienConChau qh
+    LEFT JOIN TAISAN ts ON ts.MaDanhMuc = qh.MaConChau
+    LEFT JOIN PHIENDAUGIA pdg ON pdg.MaTaiSan = ts.MaTaiSan
+    GROUP BY qh.MaToTien
+)
+SELECT 
+    c.MaDanhMuc,
+    c.CapDo,
+    c.TenHienThiCay AS CauTrucCayDanhMuc,
+    tk.TongSoTaiSanTrongNhanh,
+    tk.TongSoPhienTrongNhanh,
+    c.DuongDanPhanCap
+FROM CayDanhMuc c
+LEFT JOIN ThongKeCongDon tk ON c.MaDanhMuc = tk.MaDanhMuc
+ORDER BY c.DuongDanPhanCap;
+
+
+-- 2. Truy vấn: Tìm toàn bộ Tài sản và Phiên đấu giá thuộc một nhánh 
+-- danh mục bất kỳ (Ví dụ: Nhánh 1 - 'Thiết bị công nghệ & Điện tử')
+WITH RECURSIVE NhanhDanhMucCon AS (
+    -- Chọn danh mục gốc cần tra cứu (có thể đổi MaDanhMuc = 1, 2, hoặc 3...)
+    SELECT MaDanhMuc, TenDanhMuc, MaDanhMucCha, 1 AS CapDo
+    FROM DANHMUC
+    WHERE MaDanhMuc = 1 
+
+    UNION ALL
+
+    -- Đệ quy lấy toàn bộ danh mục con, cháu bên dưới
+    SELECT dm.MaDanhMuc, dm.TenDanhMuc, dm.MaDanhMucCha, ndm.CapDo + 1
+    FROM DANHMUC dm
+    INNER JOIN NhanhDanhMucCon ndm ON dm.MaDanhMucCha = ndm.MaDanhMuc
+)
+SELECT 
+    ndm.MaDanhMuc,
+    ndm.TenDanhMuc,
+    ts.MaTaiSan,
+    ts.TenTaiSan,
+    ts.LoaiTaiSan,
+    nd.HoTen AS NguoiBan,
+    pdg.MaPhien,
+    pdg.GiaKhoiDiem,
+    COALESCE(pdg.GiaHienTai, pdg.GiaKhoiDiem) AS GiaHienTaiHoacKhoiDiem,
+    pdg.TrangThaiPhien
+FROM NhanhDanhMucCon ndm
+INNER JOIN TAISAN ts ON ts.MaDanhMuc = ndm.MaDanhMuc
+INNER JOIN NGUOIDUNG nd ON nd.MaNguoiDung = ts.MaNguoiBan
+LEFT JOIN PHIENDAUGIA pdg ON pdg.MaTaiSan = ts.MaTaiSan
+ORDER BY ndm.MaDanhMuc, ts.MaTaiSan;
+
+
+-- ---------------------------------------------------------------------
+-- 3. Các truy vấn theo dõi, giám sát và thống kê hệ thống (Thành viên 2)
 -- Các phiên đang mở và sẽ kết thúc trong vòng một giờ.
 SELECT p.MaPhien, ts.TenTaiSan, p.GiaHienTai, p.ThoiDiemDong,
        p.ThoiDiemDong - CURRENT_TIMESTAMP AS ThoiGianConLai
@@ -383,258 +604,4 @@ FROM PHIENDAUGIA p
 WHERE p.GiaHienTai IS DISTINCT FROM
       (SELECT MAX(l.SoTien) FROM LUOTTRAGIA l WHERE l.MaPhien = p.MaPhien)
 ORDER BY 1, 2;
-
--- Hai hàm cùng khóa dòng phiên. Nếu lỗi, các ghi chép của lời gọi cùng rollback.
-CREATE OR REPLACE FUNCTION fn_TraGia(
-    p_MaPhien BIGINT, p_MaNguoiDung BIGINT, p_SoTien NUMERIC, p_MaYeuCau UUID
-) RETURNS BIGINT
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_phien PHIENDAUGIA%ROWTYPE;
-    v_luot LUOTTRAGIA%ROWTYPE;
-    v_nguoi_ban BIGINT;
-    v_trang_thai_dang_ky VARCHAR(50);
-    v_gia_toi_thieu NUMERIC;
-    v_thoi_diem TIMESTAMPTZ;
-    v_ma_luot BIGINT;
-BEGIN
-    IF p_MaYeuCau IS NULL OR p_SoTien IS NULL OR p_SoTien <= 0
-       OR p_SoTien > 99999999999999.99 OR p_SoTien <> TRUNC(p_SoTien, 2) THEN
-        RAISE EXCEPTION 'Mã yêu cầu hoặc số tiền không hợp lệ' USING ERRCODE = '22023';
-    END IF;
-
-    -- Hai lần gửi cùng UUID phải kiểm tra tuần tự, kể cả khi gửi vào hai phiên.
-    PERFORM pg_advisory_xact_lock(hashtextextended(p_MaYeuCau::TEXT, 19));
-    SELECT * INTO v_luot FROM LUOTTRAGIA WHERE MaYeuCau = p_MaYeuCau;
-    IF FOUND THEN
-        IF v_luot.MaPhien IS DISTINCT FROM p_MaPhien
-           OR v_luot.MaNguoiTraGia IS DISTINCT FROM p_MaNguoiDung
-           OR v_luot.SoTien IS DISTINCT FROM p_SoTien THEN
-            RAISE EXCEPTION 'Mã yêu cầu đã dùng cho lượt trả giá khác';
-        END IF;
-        RETURN v_luot.MaLuotTraGia;
-    END IF;
-
-    SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien FOR UPDATE;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Không tìm thấy phiên đấu giá';
-    END IF;
-    IF v_phien.TrangThaiPhien <> 'DANG_DIEN_RA' THEN
-        RAISE EXCEPTION 'Phiên không nhận trả giá';
-    END IF;
-
-    SELECT MaNguoiBan INTO v_nguoi_ban FROM TAISAN
-    WHERE MaTaiSan = v_phien.MaTaiSan FOR SHARE;
-    IF p_MaNguoiDung = v_nguoi_ban THEN
-        RAISE EXCEPTION 'Người bán không được trả giá tài sản của mình';
-    END IF;
-
-    SELECT TrangThaiDangKy INTO v_trang_thai_dang_ky FROM DANGKY
-    WHERE MaPhien = p_MaPhien AND MaNguoiDung = p_MaNguoiDung FOR SHARE;
-    IF v_trang_thai_dang_ky IS DISTINCT FROM 'DA_DUYET' THEN
-        RAISE EXCEPTION 'Người trả giá chưa có đăng ký được duyệt cho phiên này';
-    END IF;
-
-    v_gia_toi_thieu := COALESCE(v_phien.GiaHienTai + v_phien.BuocGia, v_phien.GiaKhoiDiem);
-    IF p_SoTien < v_gia_toi_thieu
-       OR MOD(p_SoTien - v_phien.GiaKhoiDiem, v_phien.BuocGia) <> 0 THEN
-        RAISE EXCEPTION 'Giá trả phải từ % và đúng lưới bước giá %',
-            v_gia_toi_thieu, v_phien.BuocGia;
-    END IF;
-
-    -- Đọc đồng hồ sau khi đã chờ các khóa để không dùng giờ bắt đầu transaction.
-    v_thoi_diem := clock_timestamp();
-    IF v_thoi_diem < v_phien.ThoiDiemMo OR v_thoi_diem >= v_phien.ThoiDiemDong THEN
-        RAISE EXCEPTION 'Thời điểm trả giá nằm ngoài giờ nhận lượt';
-    END IF;
-
-    INSERT INTO LUOTTRAGIA (MaPhien, MaNguoiTraGia, SoTien, MaYeuCau, ThoiDiemChapNhan)
-    VALUES (p_MaPhien, p_MaNguoiDung, p_SoTien, p_MaYeuCau, v_thoi_diem)
-    RETURNING MaLuotTraGia INTO v_ma_luot;
-
-    UPDATE PHIENDAUGIA
-    SET GiaHienTai = p_SoTien, MaLuotDanDau = v_ma_luot, PhienBan = PhienBan + 1
-    WHERE MaPhien = p_MaPhien;
-
-    INSERT INTO NHATKYTHAYDOI (MaPhien, MaTacNhan, HanhDong, ChiTiet, ThoiDiemGhi)
-    VALUES (p_MaPhien, p_MaNguoiDung, 'CHAP_NHAN_TRA_GIA',
-            jsonb_build_object('MaLuotTraGia', v_ma_luot, 'SoTien', p_SoTien, 'MaYeuCau', p_MaYeuCau),
-            v_thoi_diem);
-
-    RETURN v_ma_luot;
-END;
-$$;
-
--- Trả về mã lượt thắng, hoặc NULL nếu phiên kết thúc không có người thắng.
-CREATE OR REPLACE FUNCTION fn_DongPhienDauGia(p_MaPhien BIGINT)
-RETURNS BIGINT
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_phien PHIENDAUGIA%ROWTYPE;
-    v_ma_luot_thang BIGINT;
-    v_gia_thang NUMERIC(16,2);
-    v_thoi_diem TIMESTAMPTZ;
-BEGIN
-    SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien FOR UPDATE;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Không tìm thấy phiên đấu giá';
-    END IF;
-
-    SELECT MaLuotThang INTO v_ma_luot_thang FROM KETQUADAUGIA WHERE MaPhien = p_MaPhien;
-    IF FOUND THEN
-        RETURN v_ma_luot_thang;
-    END IF;
-
-    v_thoi_diem := clock_timestamp();
-    IF v_thoi_diem < v_phien.ThoiDiemDong THEN
-        RAISE EXCEPTION 'Phiên chưa đến giờ đóng';
-    END IF;
-    IF v_phien.TrangThaiPhien NOT IN ('DANG_DIEN_RA', 'CHUA_MO') THEN
-        RAISE EXCEPTION 'Trạng thái phiên không cho phép chốt kết quả';
-    END IF;
-
-    SELECT MaLuotTraGia, SoTien INTO v_ma_luot_thang, v_gia_thang
-    FROM LUOTTRAGIA
-    WHERE MaPhien = p_MaPhien
-    ORDER BY SoTien DESC, MaLuotTraGia
-    LIMIT 1;
-
-    INSERT INTO KETQUADAUGIA (MaPhien, MaLuotThang, ThoiDiemChot)
-    VALUES (p_MaPhien, v_ma_luot_thang, v_thoi_diem);
-
-    UPDATE PHIENDAUGIA
-    SET TrangThaiPhien = CASE WHEN v_ma_luot_thang IS NULL THEN 'THAT_BAI' ELSE 'DA_DONG' END,
-        GiaHienTai = v_gia_thang, MaLuotDanDau = v_ma_luot_thang, PhienBan = PhienBan + 1
-    WHERE MaPhien = p_MaPhien;
-
-    INSERT INTO NHATKYTHAYDOI (MaPhien, HanhDong, ChiTiet, ThoiDiemGhi)
-    VALUES (p_MaPhien, 'DONG_PHIEN',
-            jsonb_build_object('MaLuotThang', v_ma_luot_thang, 'GiaThang', v_gia_thang),
-            v_thoi_diem);
-
-    RETURN v_ma_luot_thang;
-END;
-$$;
-
-COMMIT;
-
-
--- TESTER --
--- Ví dụ trả giá cho phiên 1 ngay sau khi nạp dữ liệu mẫu:
-SELECT fn_TraGia(1, 8, 5750000, '19000000-0000-4000-8000-000000000101');
-SELECT fn_DongPhienDauGia(2);
-
-
-SELECT *
-FROM PHIENDAUGIA
-WHERE TrangThaiPhien LIKE 'DANG_DIEN_RA';
-SELECT *
-FROM NHATKYTHAYDOI;
-
---RESET TRUY VẤN Các phiên đang mở và sẽ kết thúc trong vòng một giờ.
-UPDATE PHIENDAUGIA 
-SET ThoiDiemDong = CURRENT_TIMESTAMP + INTERVAL '30 minutes' 
-WHERE MaPhien = 1;
-
-
--- =====================================================================
--- BƯỚC 5: PHƯƠNG ÁN 2 - GIAO DỊCH VỚI MỨC CÔ LẬP SERIALIZABLE CÓ XỬ LÝ THỬ LẠI (RETRY)
--- =====================================================================
--- Yêu cầu đề cương: So sánh ít nhất 2 phương án: 
---   1. Khóa dòng phiên đấu giá (fn_TraGia phía trên - dùng SELECT ... FOR UPDATE).
---   2. Mức cô lập SERIALIZABLE có xử lý thử lại (fn_TraGia_Serializable - đọc lạc quan).
--- =====================================================================
-
-CREATE OR REPLACE FUNCTION fn_TraGia_Serializable(
-    p_MaPhien BIGINT, 
-    p_MaNguoiDung BIGINT, 
-    p_SoTien NUMERIC, 
-    p_MaYeuCau UUID
-) RETURNS BIGINT
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_phien PHIENDAUGIA%ROWTYPE;
-    v_luot LUOTTRAGIA%ROWTYPE;
-    v_nguoi_ban BIGINT;
-    v_trang_thai_dang_ky VARCHAR(50);
-    v_gia_toi_thieu NUMERIC;
-    v_thoi_diem TIMESTAMPTZ;
-    v_ma_luot BIGINT;
-    v_attempt INT;
-BEGIN
-    IF p_MaYeuCau IS NULL OR p_SoTien IS NULL OR p_SoTien <= 0 THEN
-        RAISE EXCEPTION 'Mã yêu cầu hoặc số tiền không hợp lệ';
-    END IF;
-
-    -- Vòng lặp thử lại tối đa 5 lần khi gặp xung đột tuần tự hóa (SERIALIZABLE)
-    FOR v_attempt IN 1..5 LOOP
-        BEGIN
-            -- 1. Kiểm tra chống gửi lặp cùng mã yêu cầu (Idempotency)
-            SELECT * INTO v_luot FROM LUOTTRAGIA WHERE MaYeuCau = p_MaYeuCau;
-            IF FOUND THEN
-                RETURN v_luot.MaLuotTraGia;
-            END IF;
-
-            -- 2. Đọc dữ liệu phiên lạc quan (KHÔNG dùng FOR UPDATE)
-            SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien;
-            IF NOT FOUND OR v_phien.TrangThaiPhien <> 'DANG_DIEN_RA' THEN
-                RAISE EXCEPTION 'Phiên đấu giá không tồn tại hoặc không ở trạng thái mở';
-            END IF;
-
-            -- 3. Kiểm tra điều kiện người tham gia và mức giá
-            SELECT MaNguoiBan INTO v_nguoi_ban FROM TAISAN WHERE MaTaiSan = v_phien.MaTaiSan;
-            IF p_MaNguoiDung = v_nguoi_ban THEN
-                RAISE EXCEPTION 'Người bán không được trả giá tài sản của mình';
-            END IF;
-
-            SELECT TrangThaiDangKy INTO v_trang_thai_dang_ky FROM DANGKY
-            WHERE MaPhien = p_MaPhien AND MaNguoiDung = p_MaNguoiDung;
-            IF v_trang_thai_dang_ky IS DISTINCT FROM 'DA_DUYET' THEN
-                RAISE EXCEPTION 'Người trả giá chưa có đăng ký được duyệt';
-            END IF;
-
-            v_gia_toi_thieu := COALESCE(v_phien.GiaHienTai + v_phien.BuocGia, v_phien.GiaKhoiDiem);
-            IF p_SoTien < v_gia_toi_thieu OR MOD(p_SoTien - v_phien.GiaKhoiDiem, v_phien.BuocGia) <> 0 THEN
-                RAISE EXCEPTION 'Giá trả không hợp lệ (Tối thiểu %, bước giá %)', v_gia_toi_thieu, v_phien.BuocGia;
-            END IF;
-
-            v_thoi_diem := clock_timestamp();
-            IF v_thoi_diem < v_phien.ThoiDiemMo OR v_thoi_diem >= v_phien.ThoiDiemDong THEN
-                RAISE EXCEPTION 'Thời điểm trả giá nằm ngoài khung giờ nhận lượt';
-            END IF;
-
-            -- 4. Ghi nhận lượt trả giá và cập nhật phiên nguyên tử
-            INSERT INTO LUOTTRAGIA (MaPhien, MaNguoiTraGia, SoTien, MaYeuCau, ThoiDiemChapNhan)
-            VALUES (p_MaPhien, p_MaNguoiDung, p_SoTien, p_MaYeuCau, v_thoi_diem)
-            RETURNING MaLuotTraGia INTO v_ma_luot;
-
-            UPDATE PHIENDAUGIA
-            SET GiaHienTai = p_SoTien, MaLuotDanDau = v_ma_luot, PhienBan = PhienBan + 1
-            WHERE MaPhien = p_MaPhien;
-
-            INSERT INTO NHATKYTHAYDOI (MaPhien, MaTacNhan, HanhDong, ChiTiet, ThoiDiemGhi)
-            VALUES (p_MaPhien, p_MaNguoiDung, 'CHAP_NHAN_TRA_GIA',
-                    jsonb_build_object('MaLuotTraGia', v_ma_luot, 'SoTien', p_SoTien, 'MaYeuCau', p_MaYeuCau),
-                    v_thoi_diem);
-
-            RETURN v_ma_luot; -- Trả về thành công!
-
-        EXCEPTION
-            -- Bắt lỗi xung đột SERIALIZABLE (Mã lỗi 40001: serialization_failure) để tự động thử lại
-            WHEN serialization_failure OR deadlock_detected THEN
-                IF v_attempt = 5 THEN
-                    RAISE EXCEPTION 'Giao dịch thất bại sau 5 lần thử lại do xung đột tuần tự hóa';
-                END IF;
-                -- Nghỉ một khoảng ngắn trước khi thử lại
-                PERFORM pg_sleep(0.01 * v_attempt + random() * 0.02);
-        END;
-    END LOOP;
-END;
-$$;
-
-
-
 
