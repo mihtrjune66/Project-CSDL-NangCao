@@ -60,6 +60,11 @@ SELECT fn_TraGia(
     '19000000-0000-4000-8000-000000000101'::uuid
 );
 
+-- Đếm số lượng bản ghi để test
+SELECT COUNT(*) AS SoLuongBanGhi 
+FROM LUOTTRAGIA 
+WHERE MaYeuCau = '19000000-0000-4000-8000-000000000101'::uuid;
+
 -- 2.3. Kiểm tra nhật ký và giá hiện tại sau khi trả giá:
 SELECT MaPhien, GiaHienTai, MaLuotDanDau, PhienBan 
 FROM PHIENDAUGIA 
@@ -89,7 +94,7 @@ SELECT fn_TraGia(1, 8, 5800000, gen_random_uuid());
 SELECT fn_TraGia_Serializable(
     1, 
     7,                          -- Người dùng 7 (đã được duyệt đăng ký phiên 1)
-    6000000,                    -- Giá trả hợp lệ tiếp theo
+    5750000,                    -- Giá trả hợp lệ tiếp theo
     gen_random_uuid()           -- Sinh ngẫu nhiên mã yêu cầu
 );
 
@@ -117,14 +122,26 @@ WHERE MaPhien = 2;
 
 
 -- TEST CASE 6: KIỂM TRA TÍNH NHẤT QUÁN TOÀN BỘ CƠ SỞ DỮ LIỆU
--- Truy vấn đối soát: Nếu kết quả trả về 0 dòng -> CSDL đạt tính nhất quán 100%!
-SELECT p.MaPhien, p.GiaHienTai, MAX(l.SoTien) AS GiaCaoNhatThucTe,
+-- Truy vấn đối soát: Hiển thị trạng thái so khớp của toàn bộ 20 phiên đấu giá
+SELECT p.MaPhien, p.GiaHienTai, MAX(l.SoTien) AS GiaCaoNhatTrongLichSu,
        CASE 
            WHEN p.GiaHienTai IS NOT DISTINCT FROM MAX(l.SoTien) THEN 'NHAT_QUAN'
            ELSE 'SAI_LECH'
-       END AS TrangThaiDoiSoat
+       END AS KetQuaDoiSoat
 FROM PHIENDAUGIA p
 LEFT JOIN LUOTTRAGIA l ON p.MaPhien = l.MaPhien
 GROUP BY p.MaPhien, p.GiaHienTai
-HAVING p.GiaHienTai IS DISTINCT FROM MAX(l.SoTien);
+ORDER BY p.MaPhien;
+
+
+-- Hỗ trợ cho minh chứng 5: Đo lường và so sánh thời gian thực thi
+
+-- 1. Đo thời gian thực thi của Phương án 1 (Khóa bi quan FOR UPDATE):
+EXPLAIN ANALYZE 
+SELECT fn_TraGia(1, 8, 5750000, gen_random_uuid());
+
+
+-- 2. Đo thời gian thực thi của Phương án 2 (Mức cô lập SERIALIZABLE có Retry Loop):
+EXPLAIN ANALYZE 
+SELECT fn_TraGia_Serializable(1, 7, 6250000, gen_random_uuid());
 
