@@ -1,7 +1,6 @@
--- Quy mô: 15 Người dùng | 21 Danh mục (3 cấp) | 18 Tài sản (6 mỗi loại)
--- Phần thành viên 2 (bảng 7-11): chạy sau DDL_HeThongDauGia.sql trên CSDL mới tạo.
--- 15 người dùng, 21 danh mục, 18 tài sản, 20 phiên đấu giá, 45 lượt trả giá.
--- Phiên: 6 DANG_DIEN_RA, 3 CHUA_MO, 7 DA_DONG (có người thắng), 4 THAT_BAI (không ai trả giá).
+-- DỮ LIỆU MẪU HỆ THỐNG ĐẤU GIÁ TRỰC TUYẾN (Chạy sau DDL_HeThongDauGia.sql)
+-- Quy mô: 15 Người dùng | 21 Danh mục (3 cấp) | 18 Tài sản | 20 Phiên đấu giá | 50 Đăng ký | 45 Lượt trả giá
+-- Trạng thái 20 phiên: 6 DANG_DIEN_RA, 3 CHUA_MO, 7 DA_DONG (có người thắng), 4 THAT_BAI (không ai trả giá)
 
 BEGIN;
 
@@ -126,7 +125,7 @@ INSERT INTO THIETBIDIENTU (MaTaiSan, ThuongHieu, MauThietBi, SoSeRi, TinhTrang) 
 (17, 'DJI',       'Đen Carbon Fiber',             'DJI-INS3-CN-77412','Mới 99% bay 3 giờ'),
 (18, 'Accuphase', 'Vàng Champagne (Gold)',        'ACC-E800-JP-33901','Nguyên thùng xốp 99.5%');
 
--- 7. Phiên mở, chưa mở, đã chốt có người thắng và đã chốt không có lượt trả.
+-- 7. BẢNG PHIÊN ĐẤU GIÁ (20 phiên: 6 đang diễn ra, 3 chưa mở, 7 đã đóng, 4 thất bại)
 INSERT INTO PHIENDAUGIA (
     MaPhien, MaTaiSan, GiaKhoiDiem, BuocGia, ThoiDiemMo, ThoiDiemDong, TrangThaiPhien
 ) OVERRIDING SYSTEM VALUE VALUES
@@ -136,29 +135,27 @@ INSERT INTO PHIENDAUGIA (
 (4, 14, 3000000, 200000, CURRENT_TIMESTAMP - INTERVAL '1 day', CURRENT_TIMESTAMP + INTERVAL '2 hours', 'DANG_DIEN_RA'),
 (5, 2,  4000000, 200000, CURRENT_TIMESTAMP + INTERVAL '1 day', CURRENT_TIMESTAMP + INTERVAL '2 days', 'CHUA_MO'),
 (6, 8,  1000000, 100000, CURRENT_TIMESTAMP - INTERVAL '2 days', CURRENT_TIMESTAMP - INTERVAL '1 day', 'DA_DONG'),
--- Phiên 7-20: trải đều 16 ngày gần đây để thống kê tỷ lệ thành công có ý nghĩa.
 (7,  3,  80000000,  5000000, CURRENT_TIMESTAMP - INTERVAL '16 days', CURRENT_TIMESTAMP - INTERVAL '12 days', 'DA_DONG'),
 (8,  4,  40000000,  2000000, CURRENT_TIMESTAMP - INTERVAL '15 days', CURRENT_TIMESTAMP - INTERVAL '11 days', 'THAT_BAI'),
 (9,  9,   8000000,   500000, CURRENT_TIMESTAMP - INTERVAL '11 days', CURRENT_TIMESTAMP - INTERVAL '8 days',  'THAT_BAI'),
--- Phiên 10: tài sản 9 được đăng lại sau khi phiên 9 thất bại (quy tắc 5).
+-- Phiên 10: Tài sản 9 được đăng đấu giá lại sau khi Phiên 9 thất bại (Quy tắc 5)
 (10, 9,   6000000,   500000, CURRENT_TIMESTAMP - INTERVAL '6 days',  CURRENT_TIMESTAMP - INTERVAL '2 days',  'DA_DONG'),
 (11, 10, 120000000, 5000000, CURRENT_TIMESTAMP - INTERVAL '10 days', CURRENT_TIMESTAMP - INTERVAL '5 days',  'DA_DONG'),
 (12, 12, 250000000, 10000000,CURRENT_TIMESTAMP - INTERVAL '3 days',  CURRENT_TIMESTAMP + INTERVAL '2 days',  'DANG_DIEN_RA'),
 (13, 15, 220000000, 10000000,CURRENT_TIMESTAMP - INTERVAL '5 days',  CURRENT_TIMESTAMP - INTERVAL '1 day',   'THAT_BAI'),
 (14, 16, 90000000,  2000000, CURRENT_TIMESTAMP - INTERVAL '4 days',  CURRENT_TIMESTAMP + INTERVAL '1 day',   'DANG_DIEN_RA'),
--- Phiên 15: lượt trả cuối rơi vào 20 giây trước giờ đóng nên được gia hạn thêm 2 phút (quy tắc 2).
+-- Phiên 15: Lượt trả cuối rơi vào 20 giây trước giờ đóng nên được gia hạn thêm 2 phút (Quy tắc 2)
 (15, 17, 200000000, 5000000, CURRENT_TIMESTAMP - INTERVAL '3 days',
      CURRENT_TIMESTAMP - INTERVAL '3 days' + INTERVAL '2 days 18 hours 2 minutes', 'DA_DONG'),
 (16, 5,  35000000,  1500000, CURRENT_TIMESTAMP - INTERVAL '2 days',  CURRENT_TIMESTAMP + INTERVAL '3 days',  'DANG_DIEN_RA'),
 (17, 11, 45000000,  2000000, CURRENT_TIMESTAMP - INTERVAL '1 day',   CURRENT_TIMESTAMP + INTERVAL '4 days',  'DANG_DIEN_RA'),
 (18, 6,  60000000,  3000000, CURRENT_TIMESTAMP + INTERVAL '2 days',  CURRENT_TIMESTAMP + INTERVAL '7 days',  'CHUA_MO'),
 (19, 18, 150000000, 5000000, CURRENT_TIMESTAMP + INTERVAL '1 day',   CURRENT_TIMESTAMP + INTERVAL '6 days',  'CHUA_MO'),
--- Phiên 20: tài sản 13 đăng lại sau khi phiên 3 thất bại.
+-- Phiên 20: Tài sản 13 được đăng đấu giá lại sau khi Phiên 3 thất bại (Quy tắc 5)
 (20, 13, 7000000,   500000,  CURRENT_TIMESTAMP - INTERVAL '22 hours', CURRENT_TIMESTAMP - INTERVAL '2 hours', 'DA_DONG');
 
--- 8. Đăng ký trước thời điểm trả giá. Người bán không đăng ký phiên của mình.
+-- 8. BẢNG ĐĂNG KÝ (50 bản ghi đăng ký tham gia phiên)
 INSERT INTO DANGKY (MaPhien, MaNguoiDung, TrangThaiDangKy, ThoiDiemDangKy)
--- LechSoVoiMo: thời điểm đăng ký so với giờ mở phiên (âm = đăng ký trước khi mở).
 SELECT dk.MaPhien, dk.MaNguoiDung, dk.TrangThai, p.ThoiDiemMo + dk.LechSoVoiMo
 FROM (VALUES
     (1, 7, 'DA_DUYET', INTERVAL '5 minutes'), (1, 8, 'DA_DUYET', INTERVAL '5 minutes'),
@@ -186,7 +183,6 @@ FROM (VALUES
     (16, 1, 'DA_DUYET', INTERVAL '-6 hours'), (16, 7, 'DA_DUYET', INTERVAL '-6 hours'),
     (16, 14, 'DA_DUYET', INTERVAL '-6 hours'),
     (17, 5, 'DA_DUYET', INTERVAL '-6 hours'), (17, 11, 'DA_DUYET', INTERVAL '-6 hours'),
-    -- Phiên chưa mở: đăng ký cách đây 6 giờ, đang chờ đến giờ mở.
     (18, 2, 'DA_DUYET', INTERVAL '-2 days -6 hours'), (18, 12, 'CHO_DUYET', INTERVAL '-2 days -6 hours'),
     (19, 5, 'CHO_DUYET', INTERVAL '-1 day -6 hours'), (19, 7, 'DA_DUYET', INTERVAL '-1 day -6 hours'),
     (19, 10, 'TU_CHOI', INTERVAL '-1 day -6 hours'),
@@ -195,7 +191,7 @@ FROM (VALUES
 ) AS dk(MaPhien, MaNguoiDung, TrangThai, LechSoVoiMo)
 JOIN PHIENDAUGIA p ON p.MaPhien = dk.MaPhien;
 
--- 9. Lịch sử lượt hợp lệ, mỗi lượt có một mã yêu cầu riêng.
+-- 9. BẢNG LƯỢT TRẢ GIÁ (45 lượt trả giá hợp lệ, tuân thủ lưới bước giá và có mã UUID riêng)
 INSERT INTO LUOTTRAGIA (MaPhien, MaNguoiTraGia, SoTien, MaYeuCau, ThoiDiemChapNhan)
 SELECT lg.MaPhien, lg.MaNguoiDung, lg.SoTien, lg.MaYeuCau::UUID,
        p.ThoiDiemMo + lg.SauKhiMo
@@ -207,7 +203,6 @@ FROM (VALUES
     (2, 12,2100000, '19000000-0000-4000-8000-000000000005', INTERVAL '20 minutes'),
     (6, 7, 1000000, '19000000-0000-4000-8000-000000000006', INTERVAL '10 minutes'),
     (6, 13,1200000, '19000000-0000-4000-8000-000000000007', INTERVAL '20 minutes'),
-    -- Mọi giá đều nằm trên lưới GiaKhoiDiem + k * BuocGia và tăng ít nhất một bước.
     (7, 5,  80000000, '19000000-0000-4000-8000-000000000008', INTERVAL '1 hour'),
     (7, 10, 85000000, '19000000-0000-4000-8000-000000000009', INTERVAL '6 hours'),
     (7, 5,  90000000, '19000000-0000-4000-8000-000000000010', INTERVAL '1 day'),
@@ -260,7 +255,7 @@ SET GiaHienTai = l.SoTien, MaLuotDanDau = l.MaLuotTraGia, PhienBan = l.SoLuot
 FROM LuotCaoNhat l
 WHERE p.MaPhien = l.MaPhien;
 
--- 10. Phiên thất bại có kết quả với MaLuotThang NULL theo EER.
+-- 10. BẢNG KẾT QUẢ ĐẤU GIÁ (11 phiên đã chốt: 7 thành công, 4 thất bại có MaLuotThang NULL)
 INSERT INTO KETQUADAUGIA (MaPhien, MaLuotThang, ThoiDiemChot)
 SELECT MaPhien, MaLuotDanDau, ThoiDiemDong
 FROM PHIENDAUGIA
@@ -270,7 +265,7 @@ UPDATE PHIENDAUGIA
 SET PhienBan = PhienBan + 1
 WHERE TrangThaiPhien IN ('DA_DONG', 'THAT_BAI');
 
--- 11. Nhật ký hệ thống khi chốt phiên không có tác nhân người dùng.
+-- 11. BẢNG NHẬT KÝ THAY ĐỔI (Nhật ký trả giá, đóng phiên và gia hạn chống vây giá)
 INSERT INTO NHATKYTHAYDOI (MaPhien, MaTacNhan, HanhDong, ChiTiet, ThoiDiemGhi)
 SELECT MaPhien, MaNguoiTraGia, 'CHAP_NHAN_TRA_GIA',
        jsonb_build_object('MaLuotTraGia', MaLuotTraGia, 'SoTien', SoTien, 'MaYeuCau', MaYeuCau),

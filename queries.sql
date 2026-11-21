@@ -1,10 +1,5 @@
--- 1. HÀM BÁO CÁO CÓ BỘ LỌC ĐỘNG (Dynamic SQL)
--- Mục đích: Lọc danh sách phiên đấu giá theo nhiều tiêu chí tùy chọn:
---   + p_MaDanhMucGoc : Lọc theo nhánh danh mục (tự động lấy cả danh mục con cháu)
---   + p_TrangThai    : Lọc theo trạng thái phiên (VD: 'DANG_MO', 'DA_DONG'...)
---   + p_LoaiTaiSan   : Lọc theo phân lớp ('TACPHAMNGHETHUAT', 'DOSUUTAM', 'THIETBIDIENTU')
---   + p_GiaTu/p_GiaDen: Khoảng giá hiện tại (hoặc giá khởi điểm nếu chưa ai trả giá)
---   + p_TuKhoa       : Tìm kiếm gần đúng (ILIKE) theo tên tài sản
+-- 1. HÀM BÁO CÁO CÓ BỘ LỌC ĐỘNG (fn_BaoCaoPhienDauGiaDong)
+-- Lọc danh sách phiên đấu giá theo nhánh danh mục, trạng thái ('DANG_DIEN_RA', 'DA_DONG'...), loại tài sản, khoảng giá và từ khóa
 CREATE OR REPLACE FUNCTION fn_BaoCaoPhienDauGiaDong(
     p_MaDanhMucGoc BIGINT DEFAULT NULL,
     p_TrangThai VARCHAR(50) DEFAULT NULL,
@@ -357,10 +352,8 @@ $$;
 
 
 
--- 1. Truy vấn: Xây dựng cây phân cấp danh mục và thống kê cộng dồn 
--- (Roll-up) tổng số tài sản & phiên đấu giá từ danh mục con lên danh mục cha
+-- Truy vấn 1: Xây dựng cây phân cấp danh mục và thống kê cộng dồn (Roll-up) tài sản & phiên đấu giá
 WITH RECURSIVE CayDanhMuc AS (
-    -- Bước cơ sở: Lấy các danh mục gốc (Cấp 1)
     SELECT 
         dm.MaDanhMuc,
         dm.TenDanhMuc,
@@ -373,7 +366,6 @@ WITH RECURSIVE CayDanhMuc AS (
 
     UNION ALL
 
-    -- Bước đệ quy: Nối các danh mục con vào danh mục cha
     SELECT 
         con.MaDanhMuc,
         con.TenDanhMuc,
@@ -384,8 +376,6 @@ WITH RECURSIVE CayDanhMuc AS (
     FROM DANHMUC con
     INNER JOIN CayDanhMuc cha ON con.MaDanhMucCha = cha.MaDanhMuc
 ),
--- CTE phụ: Tìm mọi cặp (Danh mục Tổ tiên, Danh mục Con cháu bao gồm chính nó)
--- để tính tổng cộng dồn từ các nhánh lá lên nhánh gốc
 QuanHeToTienConChau AS (
     SELECT MaDanhMuc AS MaToTien, MaDanhMuc AS MaConChau
     FROM DANHMUC
@@ -418,17 +408,14 @@ LEFT JOIN ThongKeCongDon tk ON c.MaDanhMuc = tk.MaDanhMuc
 ORDER BY c.DuongDanPhanCap;
 
 
--- 2. Truy vấn: Tìm toàn bộ Tài sản và Phiên đấu giá thuộc một nhánh 
--- danh mục bất kỳ (Ví dụ: Nhánh 1 - 'Thiết bị công nghệ & Điện tử')
+-- Truy vấn 2: Tìm toàn bộ tài sản và phiên đấu giá thuộc một nhánh danh mục (Ví dụ: Nhánh 1 - 'Thiết bị công nghệ & Điện tử')
 WITH RECURSIVE NhanhDanhMucCon AS (
-    -- Chọn danh mục gốc cần tra cứu (có thể đổi MaDanhMuc = 1, 2, hoặc 3...)
     SELECT MaDanhMuc, TenDanhMuc, MaDanhMucCha, 1 AS CapDo
     FROM DANHMUC
     WHERE MaDanhMuc = 1 
 
     UNION ALL
 
-    -- Đệ quy lấy toàn bộ danh mục con, cháu bên dưới
     SELECT dm.MaDanhMuc, dm.TenDanhMuc, dm.MaDanhMucCha, ndm.CapDo + 1
     FROM DANHMUC dm
     INNER JOIN NhanhDanhMucCon ndm ON dm.MaDanhMucCha = ndm.MaDanhMuc
@@ -451,9 +438,7 @@ LEFT JOIN PHIENDAUGIA pdg ON pdg.MaTaiSan = ts.MaTaiSan
 ORDER BY ndm.MaDanhMuc, ts.MaTaiSan;
 
 
--- ---------------------------------------------------------------------
--- 3. Các truy vấn theo dõi, giám sát và thống kê hệ thống (Thành viên 2)
--- Các phiên đang mở và sẽ kết thúc trong vòng một giờ.
+-- Truy vấn 3: Tìm các phiên đấu giá đang diễn ra và sẽ kết thúc trong vòng 1 giờ
 SELECT p.MaPhien, ts.TenTaiSan, p.GiaHienTai, p.ThoiDiemDong,
        p.ThoiDiemDong - CURRENT_TIMESTAMP AS ThoiGianConLai
 FROM PHIENDAUGIA p
@@ -464,7 +449,8 @@ WHERE p.TrangThaiPhien = 'DANG_DIEN_RA'
   AND p.ThoiDiemDong <= CURRENT_TIMESTAMP + INTERVAL '1 hour'
 ORDER BY p.ThoiDiemDong, p.MaPhien;
 
--- Người dẫn đầu; phiên chưa có lượt trả vẫn xuất hiện.
+
+-- Truy vấn 4: Xác định người đang dẫn đầu của các phiên đấu giá (bao gồm cả phiên chưa có lượt trả giá)
 SELECT p.MaPhien, ts.TenTaiSan, nd.HoTen AS NguoiDanDau,
        l.SoTien AS GiaDanDau, l.ThoiDiemChapNhan
 FROM PHIENDAUGIA p
@@ -473,7 +459,8 @@ LEFT JOIN LUOTTRAGIA l ON l.MaLuotTraGia = p.MaLuotDanDau AND l.MaPhien = p.MaPh
 LEFT JOIN NGUOIDUNG nd ON nd.MaNguoiDung = l.MaNguoiTraGia
 ORDER BY p.MaPhien;
 
--- Lịch sử giá và mức tăng so với lượt liền trước của cùng phiên.
+
+-- Truy vấn 5: Lịch sử thay đổi giá và mức tăng so với lượt liền trước của cùng phiên
 SELECT l.MaPhien, l.MaLuotTraGia, nd.HoTen AS NguoiTraGia,
        l.ThoiDiemChapNhan, l.SoTien,
        l.SoTien - LAG(l.SoTien) OVER (
@@ -483,7 +470,8 @@ FROM LUOTTRAGIA l
 JOIN NGUOIDUNG nd ON nd.MaNguoiDung = l.MaNguoiTraGia
 ORDER BY l.MaPhien, l.ThoiDiemChapNhan, l.MaLuotTraGia;
 
--- Tổng hợp đăng ký và lượt trả riêng để không đếm trùng khi ghép bảng.
+
+-- Truy vấn 6: Thống kê số lượng người đăng ký và lượt trả giá theo từng phiên (tách CTE để chống đếm trùng)
 WITH SoDangKy AS (
     SELECT MaPhien, COUNT(*) AS SoNguoiDangKy,
            COUNT(*) FILTER (WHERE TrangThaiDangKy = 'DA_DUYET') AS SoNguoiDaDuyet
@@ -505,7 +493,8 @@ LEFT JOIN SoDangKy d ON d.MaPhien = p.MaPhien
 LEFT JOIN SoTraGia l ON l.MaPhien = p.MaPhien
 ORDER BY p.MaPhien;
 
--- Giá thắng lấy từ lượt thắng. Tỷ lệ tính trên các phiên đã chốt.
+
+-- Truy vấn 7: Truy xuất giá thắng cuộc và thống kê tỷ lệ phiên thành công trên các phiên đã chốt
 SELECT k.MaPhien, k.ThoiDiemChot, nd.HoTen AS NguoiThang, l.SoTien AS GiaThang
 FROM KETQUADAUGIA k
 LEFT JOIN LUOTTRAGIA l ON l.MaLuotTraGia = k.MaLuotThang AND l.MaPhien = k.MaPhien
@@ -516,9 +505,8 @@ SELECT COUNT(*) AS SoPhienDaChot, COUNT(MaLuotThang) AS SoPhienThanhCong,
        ROUND(100.0 * COUNT(MaLuotThang) / NULLIF(COUNT(*), 0), 2) AS TyLeThanhCongPhanTram
 FROM KETQUADAUGIA;
 
--- Xếp hạng người trả giá trong từng phiên bằng hàm cửa sổ (mỗi người lấy mức giá cao nhất).
--- Hạng 1 là người dẫn đầu; cùng giá thì lượt được chấp nhận trước đứng trên (quy tắc 4).
--- Cột KhopMaLuotDanDau đối chiếu kết quả tính lại với MaLuotDanDau lưu trong PHIENDAUGIA.
+
+-- Truy vấn 8: Xếp hạng người trả giá trong từng phiên bằng Window Functions và đối soát MaLuotDanDau
 WITH GiaCaoNhatMoiNguoi AS (
     SELECT DISTINCT ON (l.MaPhien, l.MaNguoiTraGia)
            l.MaPhien, l.MaNguoiTraGia, l.MaLuotTraGia, l.SoTien, l.ThoiDiemChapNhan
@@ -545,8 +533,8 @@ JOIN NGUOIDUNG nd ON nd.MaNguoiDung = x.MaNguoiTraGia
 WHERE x.Hang = 1
 ORDER BY x.MaPhien;
 
--- Tỷ lệ phiên thành công theo từng nhánh danh mục gốc.
--- CTE đệ quy gắn mỗi danh mục lá về danh mục gốc; ROLLUP thêm dòng tổng toàn hệ thống.
+
+-- Truy vấn 9: Thống kê tỷ lệ phiên thành công và tổng giá trị giao dịch theo từng nhánh danh mục gốc (WITH RECURSIVE & ROLLUP)
 WITH RECURSIVE GocDanhMuc AS (
     SELECT MaDanhMuc, MaDanhMuc AS MaGoc, TenDanhMuc AS TenGoc
     FROM DANHMUC
@@ -572,7 +560,8 @@ LEFT JOIN LUOTTRAGIA l ON l.MaLuotTraGia = k.MaLuotThang AND l.MaPhien = k.MaPhi
 GROUP BY ROLLUP ((g.MaGoc, g.TenGoc))
 ORDER BY GROUPING(g.MaGoc), g.MaGoc;
 
--- Bảng xếp hạng người mua trên các phiên đã chốt: số phiên tham gia, số phiên thắng, tổng chi.
+
+-- Truy vấn 10: Bảng xếp hạng người mua trên các phiên đã chốt (số phiên tham gia, số phiên thắng, tổng giá thắng)
 WITH ThamGia AS (
     SELECT l.MaNguoiTraGia AS MaNguoiDung, COUNT(DISTINCT l.MaPhien) AS SoPhienThamGia
     FROM LUOTTRAGIA l
@@ -595,7 +584,8 @@ JOIN NGUOIDUNG nd ON nd.MaNguoiDung = tg.MaNguoiDung
 LEFT JOIN Thang th ON th.MaNguoiDung = tg.MaNguoiDung
 ORDER BY Hang, nd.HoTen;
 
--- Kiểm tra dữ liệu theo quy tắc nghiệp vụ. Kết quả rỗng nghĩa là không có vi phạm.
+
+-- Truy vấn 11: Kiểm toán toàn vẹn dữ liệu theo quy tắc nghiệp vụ (Kết quả rỗng = 0 vi phạm)
 WITH LuotCoGiaTruoc AS (
     SELECT l.*,
            LAG(l.SoTien) OVER (PARTITION BY l.MaPhien
