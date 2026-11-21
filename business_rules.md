@@ -15,8 +15,8 @@
 * Điều kiện chống gian lận: Người tạo tài sản (Người bán `TAISAN.MaNguoiBan`) tuyệt đối không được phép trả giá cho chính tài sản của mình.
 
 **4. Cách xử lý hai yêu cầu cùng mức giá (Tie-breaking)**
-* Trong một phiên, mỗi mức giá chỉ có tối đa một lượt trả giá được chấp nhận (`UNIQUE (MaPhien, SoTien)`). Khi hai yêu cầu trả cùng một mức giá xuất hiện đồng thời, hệ thống phân định dựa trên thứ tự chiếm giữ khóa hoặc kiểm tra phiên bản (`PhienBan`) nguyên tử trong Transaction của CSDL.
-* Yêu cầu nào chiếm được khóa dòng (hoặc cập nhật `PhienBan`) và commit trước sẽ được ghi nhận. Yêu cầu đến sau bị từ chối (hoặc sau khi Retry nạp lại Snapshot mới sẽ bị từ chối) do `GiaHienTai` lúc này đã bị đẩy lên, vi phạm điều kiện bước giá tối thiểu.
+* Trong một phiên, mỗi mức giá chỉ có tối đa một lượt trả giá được chấp nhận (`UNIQUE (MaPhien, SoTien)`). Khi hai yêu cầu trả cùng một mức giá xuất hiện đồng thời, hệ thống phân định dựa trên thứ tự giao dịch trong CSDL: khóa dòng phiên (Phương án 1) hoặc phát hiện xung đột tuần tự hóa của mức `SERIALIZABLE` (Phương án 2).
+* Yêu cầu nào chiếm được khóa dòng (Phương án 1) hoặc commit trước (Phương án 2) sẽ được ghi nhận. Yêu cầu đến sau bị từ chối (ở Phương án 2: nhận lỗi `40001`, client thử lại cả giao dịch trên snapshot mới rồi bị từ chối) do `GiaHienTai` lúc này đã bị đẩy lên, vi phạm điều kiện bước giá tối thiểu.
 
 **5. Cách xử lý khi KHÔNG có lượt trả giá hợp lệ (Bổ sung đầy đủ theo đề bài)**
 * Khi mốc `ThoiDiemDong` đã qua mà phiên đấu giá không ghi nhận bất kỳ lượt trả giá nào hợp lệ (bảng `LUOTTRAGIA` trống cho phiên đó):

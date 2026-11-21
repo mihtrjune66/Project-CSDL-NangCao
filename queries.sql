@@ -247,13 +247,15 @@ END;
 $$;
 
 
--- 4. HÀM TRẢ GIÁ - PHƯƠNG ÁN 2: KIỂM SOÁT LẠC QUAN (OCC / SERIALIZABLE) CÓ RETRY LOOP
--- Sử dụng: Đọc lạc quan KHÔNG dùng FOR UPDATE, kiểm tra xung đột qua cột PhienBan (Version)
--- Tự động bắt mã lỗi 40001 (serialization_failure) và thử lại tối đa 5 lần với Random Backoff
+-- 4. HÀM TRẢ GIÁ - PHƯƠNG ÁN 2: MỨC CÔ LẬP SERIALIZABLE CÓ THỬ LẠI
+-- Sử dụng: BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT fn_TraGia_Serializable(...); COMMIT;
+-- Không khóa dòng, PostgreSQL tự phát hiện xung đột và báo lỗi 40001.
+-- Gặp lỗi 40001 thì ROLLBACK rồi chạy lại cả giao dịch với cùng MaYeuCau
+-- (không thử lại bên trong hàm vì snapshot của giao dịch SERIALIZABLE không đổi).
 CREATE OR REPLACE FUNCTION fn_TraGia_Serializable(
-    p_MaPhien BIGINT, 
-    p_MaNguoiDung BIGINT, 
-    p_SoTien NUMERIC, 
+    p_MaPhien BIGINT,
+    p_MaNguoiDung BIGINT,
+    p_SoTien NUMERIC,
     p_MaYeuCau UUID
 ) RETURNS BIGINT
 LANGUAGE plpgsql
@@ -266,95 +268,90 @@ DECLARE
     v_gia_toi_thieu NUMERIC;
     v_thoi_diem TIMESTAMPTZ;
     v_ma_luot BIGINT;
-    v_attempt INT;
 BEGIN
-    -- Kiểm tra đầu vào đồng bộ với Phương án 1 (Khắc phục lỗi #18)
+    -- Bắt buộc gọi trong giao dịch SERIALIZABLE
+    IF current_setting('transaction_isolation') <> 'serializable' THEN
+        RAISE EXCEPTION 'Phương án 2 phải chạy trong giao dịch SERIALIZABLE'
+            USING ERRCODE = '25001',
+                  HINT = 'BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT fn_TraGia_Serializable(...); COMMIT;';
+    END IF;
+
     IF p_MaYeuCau IS NULL OR p_SoTien IS NULL OR p_SoTien <= 0
        OR p_SoTien > 99999999999999.99 OR p_SoTien <> TRUNC(p_SoTien, 2) THEN
         RAISE EXCEPTION 'Mã yêu cầu hoặc số tiền không hợp lệ' USING ERRCODE = '22023';
     END IF;
 
-    -- Khóa tư vấn theo mã UUID để tuần tự hóa 2 request gửi trùng cùng lúc (Khắc phục lỗi #3)
-    PERFORM pg_advisory_xact_lock(hashtextextended(p_MaYeuCau::TEXT, 19));
+    -- 1. Chống gửi lặp: cùng MaYeuCau đã được chấp nhận thì trả lại lượt cũ
+    SELECT * INTO v_luot FROM LUOTTRAGIA WHERE MaYeuCau = p_MaYeuCau;
+    IF FOUND THEN
+        IF v_luot.MaPhien IS DISTINCT FROM p_MaPhien
+           OR v_luot.MaNguoiTraGia IS DISTINCT FROM p_MaNguoiDung
+           OR v_luot.SoTien IS DISTINCT FROM p_SoTien THEN
+            RAISE EXCEPTION 'Mã yêu cầu đã dùng cho lượt trả giá khác';
+        END IF;
+        RETURN v_luot.MaLuotTraGia;
+    END IF;
 
-    -- Vòng lặp thử lại tối đa 5 lần khi gặp xung đột tương tranh
-    FOR v_attempt IN 1..5 LOOP
-        BEGIN
-            -- 1. Kiểm tra chống gửi lặp cùng mã yêu cầu (Idempotency)
-            SELECT * INTO v_luot FROM LUOTTRAGIA WHERE MaYeuCau = p_MaYeuCau;
-            IF FOUND THEN
-                IF v_luot.MaPhien IS DISTINCT FROM p_MaPhien
-                   OR v_luot.MaNguoiTraGia IS DISTINCT FROM p_MaNguoiDung
-                   OR v_luot.SoTien IS DISTINCT FROM p_SoTien THEN
-                    RAISE EXCEPTION 'Mã yêu cầu đã dùng cho lượt trả giá khác';
-                END IF;
-                RETURN v_luot.MaLuotTraGia;
-            END IF;
+    -- 2. Đọc phiên (không FOR UPDATE)
+    SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Không tìm thấy phiên đấu giá';
+    END IF;
+    IF v_phien.TrangThaiPhien <> 'DANG_DIEN_RA' THEN
+        RAISE EXCEPTION 'Phiên không nhận trả giá';
+    END IF;
 
-            -- 2. Đọc dữ liệu phiên lạc quan (KHÔNG dùng FOR UPDATE)
-            SELECT * INTO v_phien FROM PHIENDAUGIA WHERE MaPhien = p_MaPhien;
-            IF NOT FOUND OR v_phien.TrangThaiPhien <> 'DANG_DIEN_RA' THEN
-                RAISE EXCEPTION 'Phiên đấu giá không tồn tại hoặc không ở trạng thái mở';
-            END IF;
+    -- 3. Kiểm tra người tham gia và mức giá giống Phương án 1
+    SELECT MaNguoiBan INTO v_nguoi_ban FROM TAISAN WHERE MaTaiSan = v_phien.MaTaiSan;
+    IF p_MaNguoiDung = v_nguoi_ban THEN
+        RAISE EXCEPTION 'Người bán không được trả giá tài sản của mình';
+    END IF;
 
-            -- 3. Kiểm tra điều kiện người tham gia và mức giá (giữ khóa FOR SHARE như Phương án 1)
-            SELECT MaNguoiBan INTO v_nguoi_ban FROM TAISAN
-            WHERE MaTaiSan = v_phien.MaTaiSan FOR SHARE;
-            IF p_MaNguoiDung = v_nguoi_ban THEN
-                RAISE EXCEPTION 'Người bán không được trả giá tài sản của mình';
-            END IF;
+    SELECT TrangThaiDangKy INTO v_trang_thai_dang_ky FROM DANGKY
+    WHERE MaPhien = p_MaPhien AND MaNguoiDung = p_MaNguoiDung;
+    IF v_trang_thai_dang_ky IS DISTINCT FROM 'DA_DUYET' THEN
+        RAISE EXCEPTION 'Người trả giá chưa có đăng ký được duyệt cho phiên này';
+    END IF;
 
-            SELECT TrangThaiDangKy INTO v_trang_thai_dang_ky FROM DANGKY
-            WHERE MaPhien = p_MaPhien AND MaNguoiDung = p_MaNguoiDung FOR SHARE;
-            IF v_trang_thai_dang_ky IS DISTINCT FROM 'DA_DUYET' THEN
-                RAISE EXCEPTION 'Người trả giá chưa có đăng ký được duyệt cho phiên này';
-            END IF;
+    v_gia_toi_thieu := COALESCE(v_phien.GiaHienTai + v_phien.BuocGia, v_phien.GiaKhoiDiem);
+    IF p_SoTien < v_gia_toi_thieu
+       OR MOD(p_SoTien - v_phien.GiaKhoiDiem, v_phien.BuocGia) <> 0 THEN
+        RAISE EXCEPTION 'Giá trả phải từ % và đúng lưới bước giá %',
+            v_gia_toi_thieu, v_phien.BuocGia;
+    END IF;
 
-            v_gia_toi_thieu := COALESCE(v_phien.GiaHienTai + v_phien.BuocGia, v_phien.GiaKhoiDiem);
-            IF p_SoTien < v_gia_toi_thieu OR MOD(p_SoTien - v_phien.GiaKhoiDiem, v_phien.BuocGia) <> 0 THEN
-                RAISE EXCEPTION 'Giá trả phải từ % và đúng lưới bước giá %',
-                    v_gia_toi_thieu, v_phien.BuocGia;
-            END IF;
+    v_thoi_diem := clock_timestamp();
+    IF v_thoi_diem < v_phien.ThoiDiemMo OR v_thoi_diem >= v_phien.ThoiDiemDong THEN
+        RAISE EXCEPTION 'Thời điểm trả giá nằm ngoài giờ nhận lượt';
+    END IF;
 
-            v_thoi_diem := clock_timestamp();
-            IF v_thoi_diem < v_phien.ThoiDiemMo OR v_thoi_diem >= v_phien.ThoiDiemDong THEN
-                RAISE EXCEPTION 'Thời điểm trả giá nằm ngoài khung giờ nhận lượt';
-            END IF;
+    -- 4. Ghi lượt trả và cập nhật giá hiện tại
+    -- Trùng MaYeuCau hoặc trùng mức giá với giao dịch khác vừa commit thì báo 40001 để thử lại
+    BEGIN
+        INSERT INTO LUOTTRAGIA (MaPhien, MaNguoiTraGia, SoTien, MaYeuCau, ThoiDiemChapNhan)
+        VALUES (p_MaPhien, p_MaNguoiDung, p_SoTien, p_MaYeuCau, v_thoi_diem)
+        RETURNING MaLuotTraGia INTO v_ma_luot;
+    EXCEPTION WHEN unique_violation THEN
+        RAISE EXCEPTION 'Xung đột với giao dịch đồng thời, cần thử lại giao dịch'
+            USING ERRCODE = 'serialization_failure';
+    END;
 
-            -- 4. Ghi nhận lượt trả giá và cập nhật phiên kèm kiểm tra PhienBan (Khắc phục lỗi #1 & #2)
-            INSERT INTO LUOTTRAGIA (MaPhien, MaNguoiTraGia, SoTien, MaYeuCau, ThoiDiemChapNhan)
-            VALUES (p_MaPhien, p_MaNguoiDung, p_SoTien, p_MaYeuCau, v_thoi_diem)
-            RETURNING MaLuotTraGia INTO v_ma_luot;
+    -- Nếu giao dịch khác đã sửa dòng phiên thì lệnh UPDATE này báo 40001
+    UPDATE PHIENDAUGIA
+    SET GiaHienTai = p_SoTien, MaLuotDanDau = v_ma_luot, PhienBan = PhienBan + 1
+    WHERE MaPhien = p_MaPhien;
 
-            UPDATE PHIENDAUGIA
-            SET GiaHienTai = p_SoTien, MaLuotDanDau = v_ma_luot, PhienBan = PhienBan + 1
-            WHERE MaPhien = p_MaPhien AND PhienBan = v_phien.PhienBan;
+    -- Kiểm tra lại giờ đóng vì có thể đã phải chờ giao dịch khác
+    IF clock_timestamp() >= v_phien.ThoiDiemDong THEN
+        RAISE EXCEPTION 'Thời điểm trả giá nằm ngoài giờ nhận lượt';
+    END IF;
 
-            IF NOT FOUND THEN
-                -- PhienBan đã bị giao dịch khác thay đổi -> Chủ động kích hoạt mã lỗi 40001 để Retry
-                RAISE EXCEPTION 'Xung đột phiên bản dữ liệu khi cập nhật đồng thời'
-                    USING ERRCODE = 'serialization_failure';
-            END IF;
+    INSERT INTO NHATKYTHAYDOI (MaPhien, MaTacNhan, HanhDong, ChiTiet, ThoiDiemGhi)
+    VALUES (p_MaPhien, p_MaNguoiDung, 'CHAP_NHAN_TRA_GIA',
+            jsonb_build_object('MaLuotTraGia', v_ma_luot, 'SoTien', p_SoTien, 'MaYeuCau', p_MaYeuCau),
+            v_thoi_diem);
 
-            INSERT INTO NHATKYTHAYDOI (MaPhien, MaTacNhan, HanhDong, ChiTiet, ThoiDiemGhi)
-            VALUES (p_MaPhien, p_MaNguoiDung, 'CHAP_NHAN_TRA_GIA',
-                    jsonb_build_object('MaLuotTraGia', v_ma_luot, 'SoTien', p_SoTien, 'MaYeuCau', p_MaYeuCau),
-                    v_thoi_diem);
-
-            RETURN v_ma_luot; -- Trả về thành công
-
-        EXCEPTION
-            -- Bắt lỗi xung đột tuần tự hóa (40001), deadlock hoặc trùng mức giá đồng thời
-            WHEN serialization_failure OR deadlock_detected OR unique_violation THEN
-                -- Nếu bên ngoài đang bọc trong SERIALIZABLE/REPEATABLE READ thì ném thẳng 40001 ra ngoài
-                IF current_setting('transaction_isolation') <> 'read committed' OR v_attempt = 5 THEN
-                    RAISE EXCEPTION 'Giao dịch thất bại sau % lần thử lại do xung đột tuần tự hóa', v_attempt
-                        USING ERRCODE = 'serialization_failure';
-                END IF;
-                -- Ở chế độ mặc định, nghỉ Random Backoff rồi tự nạp lại Snapshot mới nhất ở vòng lặp kế tiếp
-                PERFORM pg_sleep(0.01 * v_attempt + random() * 0.02);
-        END;
-    END LOOP;
+    RETURN v_ma_luot;
 END;
 $$;
 

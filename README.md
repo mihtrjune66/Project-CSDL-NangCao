@@ -50,7 +50,7 @@ Project-CSDL-Nangcao/
    - Hàm báo cáo động (`Dynamic SQL`) với bộ lọc tham số linh hoạt chống SQL Injection.
 5. **Kiểm soát đồng thời chuyên sâu (Concurrency Control):**
    - **Phương án 1 (Khóa bi quan):** Sử dụng `SELECT ... FOR UPDATE` trên dòng phiên để tuần tự hóa các yêu cầu trả giá cạnh tranh.
-   - **Phương án 2 (Mức cô lập Tuần tự hóa):** Sử dụng mức cô lập `SERIALIZABLE` (Serializable Snapshot Isolation - SSI) kết hợp vòng lặp Retry loop tự động bắt mã lỗi `40001 (serialization_failure)`.
+   - **Phương án 2 (Mức cô lập Tuần tự hóa):** Sử dụng mức cô lập `SERIALIZABLE` (Serializable Snapshot Isolation - SSI), không khóa dòng. Khi gặp lỗi `40001 (serialization_failure)` thì `ROLLBACK` và chạy lại cả giao dịch với cùng `MaYeuCau`.
    - Phối hợp nguyên tử giữa giao dịch trả giá và thủ tục đóng phiên `fn_DongPhienDauGia`.
 
 ---
@@ -76,7 +76,7 @@ Project-CSDL-Nangcao/
     1. `fn_BaoCaoPhienDauGiaDong` (Dynamic SQL lọc phiên đa tiêu chí)
     2. `fn_TraGia` (Khóa bi quan `SELECT ... FOR UPDATE`)
     3. `fn_DongPhienDauGia` (Chốt phiên và xác định người thắng an toàn)
-    4. `fn_TraGia_Serializable` (Tuần tự hóa SSI có Retry Loop bắt mã `40001`)
+    4. `fn_TraGia_Serializable` (Tuần tự hóa SSI, gặp `40001` thì chạy lại giao dịch)
   * **Khối II (Ở dưới): Bộ truy vấn SQL nâng cao:**
     * Đệ quy cây danh mục (WITH RECURSIVE roll-up).
     * Theo dõi phiên sắp kết thúc trong 1 giờ, người dẫn đầu phiên.

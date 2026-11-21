@@ -127,16 +127,21 @@ FROM LUOTTRAGIA WHERE MaPhien = 1;
 
 
 -- =============================================================================
--- TEST CASE 4: KIỂM THỬ PHƯƠNG ÁN 2 (SERIALIZABLE / OCC RETRY) & NHIỀU NGƯỜI TRẢ GIÁ CÙNG LÚC
+-- TEST CASE 4: KIỂM THỬ PHƯƠNG ÁN 2 (SERIALIZABLE CÓ THỬ LẠI) & NHIỀU NGƯỜI TRẢ GIÁ CÙNG LÚC
+-- Lưu ý: fn_TraGia_Serializable phải chạy trong BEGIN ISOLATION LEVEL SERIALIZABLE.
+-- Nếu gặp lỗi 40001 thì ROLLBACK rồi chạy lại cả khối với cùng mã yêu cầu.
 -- Kịch bản đề bài: "Nhiều người trả giá cùng lúc" (Concurrent Bidding)
 -- =============================================================================
 -- 4.1. Trả giá mức hợp lệ tiếp theo cho Phiên 1 (6,000,000) bằng fn_TraGia_Serializable
+--      (bôi đen từ BEGIN tới COMMIT rồi nhấn F5)
+BEGIN ISOLATION LEVEL SERIALIZABLE;
 SELECT fn_TraGia_Serializable(
     1, 
     7,                          -- Người dùng 7 (đã được duyệt đăng ký phiên 1)
     6000000,                    -- Giá trả hợp lệ tiếp theo (5,750,000 + 250,000)
     '19000000-0000-4000-8000-000000000102'::uuid
 );
+COMMIT;
 
 -- Kiểm tra lại thông tin Phiên 1 sau giao dịch (GiaHienTai = 6,000,000, PhienBan = 5):
 SELECT MaPhien, GiaHienTai, MaLuotDanDau, PhienBan 
@@ -151,8 +156,10 @@ WHERE MaPhien = 1;
 --   + Yêu cầu đồng thời đến ngay sau (Người dùng 7) phát hiện xung đột, bị từ chối 
 --     chính xác, không xảy ra Lost Update hay trùng mức giá.
 -- Cách 1 (Bôi đen từ BEGIN đến ROLLBACK bên dưới và nhấn F5 để xem bảng kết quả ngay):
+--   Cách này chạy tuần tự trong một giao dịch (yêu cầu sau thấy giá mới nên bị từ chối).
+--   Muốn chạy song song thật thì làm theo Cách 2 bên dưới.
 -- -----------------------------------------------------------------------------
-BEGIN;
+BEGIN ISOLATION LEVEL SERIALIZABLE;
 
 CREATE TEMP TABLE kq_tranh_chap_dong_thoi (
     ThuTuXuLy INT,
@@ -195,20 +202,25 @@ SELECT * FROM kq_tranh_chap_dong_thoi ORDER BY ThuTuXuLy;
 ROLLBACK;
 
 -- -----------------------------------------------------------------------------
--- Cách 2 (Chạy thực nghiệm khóa dòng trực tiếp trên 2 Tab Query Tool song song):
+-- Cách 2 (Chạy song song trên 2 Tab Query Tool, cả 2 tab đều SERIALIZABLE):
 -- * Tại TAB A (Người dùng 8 đặt mức 6,500,000 nhưng giữ giao dịch chưa COMMIT):
---   BEGIN;
---   SELECT fn_TraGia_Serializable(1, 8, 6500000, gen_random_uuid());
+--   BEGIN ISOLATION LEVEL SERIALIZABLE;
+--   SELECT fn_TraGia_Serializable(1, 8, 6500000, '19000000-0000-4000-8000-0000000004a1'::uuid);
 --
--- * Tại TAB B (Cùng lúc đó, Người dùng 7 đặt mức 6,250,000):
---   SELECT fn_TraGia_Serializable(1, 7, 6250000, gen_random_uuid());
+-- * Tại TAB B (Cùng lúc đó, Người dùng 7 nhìn giá cũ 6,000,000 và đặt mức 6,250,000):
+--   BEGIN ISOLATION LEVEL SERIALIZABLE;
+--   SELECT fn_TraGia_Serializable(1, 7, 6250000, '19000000-0000-4000-8000-0000000004b1'::uuid);
+--   --> Tab B phải chờ vì Tab A đang ghi cùng dòng phiên.
 --
 -- * Quay lại TAB A và nhấn F5 lệnh:
 --   COMMIT;
---   --> Kết quả: Tab A thành công (GiaHienTai = 6,500,000). Ngay lập tức Tab B 
---       phát hiện xung đột PhienBan (mã 40001), tự động Rollback lượt 6,250,000 
---       trong vòng lặp Retry, nạp lại Snapshot mới (thấy GiaHienTai = 6,500,000) 
---       và từ chối mức giá 6,250,000 ("Giá trả phải từ 6750000.00...")!
+--   --> Tab A thành công (GiaHienTai = 6,500,000).
+--   --> Tab B nhận lỗi 40001 "could not serialize access due to concurrent update",
+--       tức là Tab B đọc giá cũ nên không được ghi đè (không bị mất cập nhật).
+--
+-- * Tại TAB B: ROLLBACK; rồi chạy lại đúng khối BEGIN ... SELECT ... (cùng mã yêu cầu) và COMMIT;
+--   --> Lần chạy lại thấy GiaHienTai = 6,500,000 nên từ chối mức 6,250,000
+--       ("Giá trả phải từ 6750000.00 ...").
 -- -----------------------------------------------------------------------------
 
 
@@ -287,127 +299,8 @@ EXPLAIN ANALYZE
 SELECT fn_TraGia(1, 8, 6250000, gen_random_uuid());
 ROLLBACK;
 
--- 7.2. Đo thời gian thực thi của Phương án 2 (Kiểm soát lạc quan / SERIALIZABLE có Retry Loop):
-BEGIN;
+-- 7.2. Đo thời gian thực thi của Phương án 2 (SERIALIZABLE):
+BEGIN ISOLATION LEVEL SERIALIZABLE;
 EXPLAIN ANALYZE 
 SELECT fn_TraGia_Serializable(1, 8, 6250000, gen_random_uuid());
 ROLLBACK;
-
--- -----------------------------------------------------------------------------
--- 7.3. BẢNG ĐO LƯỜNG ĐỊNH LƯỢNG TỔNG HỢP THEO YÊU CẦU BƯỚC 7 CỦA ĐỀ BÀI:
--- Yêu cầu đề bài: "Đo số yêu cầu thành công, bị từ chối, phải thử lại và thời gian phản hồi.
---                  Có bảng so sánh hai giải pháp kiểm soát đồng thời trên cùng dữ liệu và cấu hình."
--- Cách chạy: Bôi đen toàn bộ mục 7.3 (từ BEGIN đến ROLLBACK) và nhấn F5.
---            Khối lệnh chạy thử nghiệm 10 yêu cầu trả giá liên tiếp (gồm cả hợp lệ, gửi trùng UUID, 
---            tranh chấp cùng mức giá và sai bước giá) trên cả 2 phương án ở cùng trạng thái dữ liệu
---            và xuất ra bảng kết quả định lượng trực tiếp.
--- -----------------------------------------------------------------------------
-BEGIN;
-
-CREATE TEMP TABLE kq_do_luong (
-    PhuongAn TEXT,
-    TongSoYeuCau INT,
-    SoThanhCong INT,
-    SoBiTuChoi INT,
-    SoLanPhaiThuLai INT,
-    TongThoiGian_ms NUMERIC(10,3),
-    ThoiGianPhanHoiTB_ms NUMERIC(10,3)
-) ON COMMIT DROP;
-
-DO $$
-DECLARE
-    v_t0 TIMESTAMPTZ;
-    v_t1 TIMESTAMPTZ;
-    v_ok INT;
-    v_fail INT;
-    v_retry INT;
-    v_ms NUMERIC(10,3);
-    v_uuid_dup UUID := '19000000-0000-4000-8000-000000000777'::uuid;
-    i INT;
-    v_gia NUMERIC;
-    v_user BIGINT;
-BEGIN
-    -- Chuẩn hóa trạng thái Phiên 1 về mức 6,000,000 trước khi đo
-    SAVEPOINT sp_bat_dau_do;
-
-    -- =========================================================================
-    -- ĐO PHƯƠNG ÁN 1: KHÓA BI QUAN (fn_TraGia - SELECT ... FOR UPDATE)
-    -- Bộ 10 yêu cầu: 5 lượt tăng hợp lệ, 1 lượt gửi lại cùng UUID, 2 lượt tranh cùng mức giá cũ, 2 lượt vi phạm
-    -- =========================================================================
-    v_ok := 0; v_fail := 0; v_retry := 0;
-    v_t0 := clock_timestamp();
-
-    FOR i IN 1..10 LOOP
-        BEGIN
-            CASE i
-                WHEN 1 THEN PERFORM fn_TraGia(1, 8, 6250000, v_uuid_dup);
-                WHEN 2 THEN PERFORM fn_TraGia(1, 8, 6250000, v_uuid_dup); -- Gửi lại cùng UUID (Idempotent -> Thành công)
-                WHEN 3 THEN PERFORM fn_TraGia(1, 7, 6250000, gen_random_uuid()); -- Tranh chấp cùng mức giá 6,250,000 -> Từ chối
-                WHEN 4 THEN PERFORM fn_TraGia(1, 7, 6500000, gen_random_uuid());
-                WHEN 5 THEN PERFORM fn_TraGia(1, 8, 6750000, gen_random_uuid());
-                WHEN 6 THEN PERFORM fn_TraGia(1, 7, 6750000, gen_random_uuid()); -- Tranh chấp cùng mức giá 6,750,000 -> Từ chối
-                WHEN 7 THEN PERFORM fn_TraGia(1, 7, 7000000, gen_random_uuid());
-                WHEN 8 THEN PERFORM fn_TraGia(1, 1, 7250000, gen_random_uuid()); -- Người bán tự trả giá -> Từ chối
-                WHEN 9 THEN PERFORM fn_TraGia(1, 8, 7100000, gen_random_uuid()); -- Sai lưới bước giá -> Từ chối
-                WHEN 10 THEN PERFORM fn_TraGia(1, 8, 7250000, gen_random_uuid());
-            END CASE;
-            v_ok := v_ok + 1;
-        EXCEPTION WHEN OTHERS THEN
-            v_fail := v_fail + 1;
-        END;
-    END LOOP;
-
-    v_t1 := clock_timestamp();
-    v_ms := ROUND((EXTRACT(EPOCH FROM (v_t1 - v_t0)) * 1000)::numeric, 3);
-    INSERT INTO kq_do_luong VALUES (
-        'Phương án 1: Khóa bi quan (SELECT ... FOR UPDATE)',
-        10, v_ok, v_fail, v_retry, v_ms, ROUND(v_ms / 10, 3)
-    );
-
-    -- Khôi phục Phiên 1 về đúng trạng thái ban đầu để đo Phương án 2 trên CÙNG DỮ LIỆU
-    ROLLBACK TO SAVEPOINT sp_bat_dau_do;
-
-    -- =========================================================================
-    -- ĐO PHƯƠNG ÁN 2: TUẦN TỰ HÓA / LẠC QUAN CÓ RETRY LOOP (fn_TraGia_Serializable)
-    -- Chạy trên đúng bộ 10 yêu cầu tương đương + ghi nhận số lần kích hoạt Retry khi va chạm PhienBan
-    -- =========================================================================
-    v_ok := 0; v_fail := 0; v_retry := 2; -- 2 yêu cầu tranh chấp mức giá kích hoạt cơ chế nạp lại Snapshot
-    v_t0 := clock_timestamp();
-
-    FOR i IN 1..10 LOOP
-        BEGIN
-            CASE i
-                WHEN 1 THEN PERFORM fn_TraGia_Serializable(1, 8, 6250000, v_uuid_dup);
-                WHEN 2 THEN PERFORM fn_TraGia_Serializable(1, 8, 6250000, v_uuid_dup); -- Gửi lại cùng UUID -> Thành công
-                WHEN 3 THEN PERFORM fn_TraGia_Serializable(1, 7, 6250000, gen_random_uuid()); -- Va chạm -> Nạp lại Snapshot & Từ chối
-                WHEN 4 THEN PERFORM fn_TraGia_Serializable(1, 7, 6500000, gen_random_uuid());
-                WHEN 5 THEN PERFORM fn_TraGia_Serializable(1, 8, 6750000, gen_random_uuid());
-                WHEN 6 THEN PERFORM fn_TraGia_Serializable(1, 7, 6750000, gen_random_uuid()); -- Va chạm -> Nạp lại Snapshot & Từ chối
-                WHEN 7 THEN PERFORM fn_TraGia_Serializable(1, 7, 7000000, gen_random_uuid());
-                WHEN 8 THEN PERFORM fn_TraGia_Serializable(1, 1, 7250000, gen_random_uuid()); -- Người bán tự trả giá -> Từ chối
-                WHEN 9 THEN PERFORM fn_TraGia_Serializable(1, 8, 7100000, gen_random_uuid()); -- Sai lưới bước giá -> Từ chối
-                WHEN 10 THEN PERFORM fn_TraGia_Serializable(1, 8, 7250000, gen_random_uuid());
-            END CASE;
-            v_ok := v_ok + 1;
-        EXCEPTION WHEN OTHERS THEN
-            v_fail := v_fail + 1;
-        END;
-    END LOOP;
-
-    v_t1 := clock_timestamp();
-    v_ms := ROUND((EXTRACT(EPOCH FROM (v_t1 - v_t0)) * 1000)::numeric, 3);
-    INSERT INTO kq_do_luong VALUES (
-        'Phương án 2: SERIALIZABLE / OCC có Retry Loop',
-        10, v_ok, v_fail, v_retry, v_ms, ROUND(v_ms / 10, 3)
-    );
-
-    ROLLBACK TO SAVEPOINT sp_bat_dau_do;
-END $$;
-
--- Hiển thị bảng so sánh định lượng 2 phương án trên cùng tập dữ liệu:
-SELECT * FROM kq_do_luong;
-
-ROLLBACK;
-
-
-
