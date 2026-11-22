@@ -1,9 +1,10 @@
-# Word temporary files
+# Word & PDF files
 ~$*.docx
 ~$*.doc
+*.docx
+*.pdf
+*.png
 
 # Temp files
 *.tmp
 *.temp
-buoc6.pdf
-
